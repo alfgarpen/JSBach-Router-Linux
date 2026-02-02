@@ -1,0 +1,334 @@
+#!/bin/bash
+
+source /usr/local/JSBach/conf/variables.conf
+
+######################################################################
+###  Funcions
+######################################################################
+
+
+fnc_ebtables_apply()
+{
+	# Flush ebtables filter table (FORWARD chain)
+	ebtables -t filter -F FORWARD
+
+	# ------------------------------------------------------------------
+	# 1. Interface Isolation (Existing)
+	# ------------------------------------------------------------------
+	
+	CONF_FILE="$DIR/$PROJECTE/$DIR_CONF/bridge_ebtables.conf"
+	
+	declare -a ISOLATED_IFS
+	
+	if [ -f "$CONF_FILE" ]; then
+		while IFS=';' read -r iface state _; do
+			[[ "$iface" =~ ^#.*$ ]] && continue
+			[ -z "$iface" ] && continue
+			
+			if [ "$state" == "1" ]; then
+				ISOLATED_IFS+=("$iface")
+			fi
+		done < "$CONF_FILE"
+	fi
+	
+	# Apply DROP rules between isolated interfaces
+	local len=${#ISOLATED_IFS[@]}
+	
+	if [ "$len" -ge 2 ]; then
+		for ((i=0; i<len; i++)); do
+			for ((j=i+1; j<len; j++)); do
+				IF1="${ISOLATED_IFS[i]}"
+				IF2="${ISOLATED_IFS[j]}"
+				
+				# Drop BIDIRECTIONAL between isolated ports
+				ebtables -t filter -A FORWARD -i "$IF1" -o "$IF2" -j DROP
+				ebtables -t filter -A FORWARD -i "$IF2" -o "$IF1" -j DROP
+			done
+		done
+	fi
+
+	# ------------------------------------------------------------------
+	# 2. VLAN Isolation (New)
+	# ------------------------------------------------------------------
+	
+	VLAN_CONF_FILE="$DIR/$PROJECTE/$DIR_CONF/bridge_ebtables_vlan.conf"
+	BRIDGE_IF_FILE="$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_IF"
+	
+	if [ -f "$VLAN_CONF_FILE" ] && [ -f "$BRIDGE_IF_FILE" ]; then
+		
+		# Read VLAN isolation states into an associative array
+		declare -A VLAN_ISOLATION_MAP
+		while IFS=';' read -r vlanid state _; do
+			[[ "$vlanid" =~ ^#.*$ ]] && continue
+			[ -z "$vlanid" ] && continue
+			if [ "$state" == "1" ]; then
+				VLAN_ISOLATION_MAP["$vlanid"]="1"
+			fi
+		done < "$VLAN_CONF_FILE"
+		
+		# Read Interfaces and their UNTAG VLAN
+		# We group interfaces by VLAN: VLAN_MEMBERS["vlanid"]="if1 if2 ..."
+		declare -A VLAN_MEMBERS
+		
+		while IFS=';' read -r iface untag tag _; do
+			[[ "$iface" =~ ^#.*$ ]] && continue
+			[ -z "$iface" ] && continue
+			
+			# If untag is not empty and not 0, add to map
+			if [ -n "$untag" ] && [ "$untag" != "0" ]; then
+				VLAN_MEMBERS["$untag"]+="$iface "
+			fi
+		done < "$BRIDGE_IF_FILE"
+		
+		# Iterate over isolated VLANs and apply rules
+		for vlanid in "${!VLAN_ISOLATION_MAP[@]}"; do
+			# Get interfaces for this VLAN
+			read -r -a IF_LIST <<< "${VLAN_MEMBERS[$vlanid]}"
+			local if_count=${#IF_LIST[@]}
+			
+			if [ "$if_count" -ge 2 ]; then
+				for ((i=0; i<if_count; i++)); do
+					for ((j=i+1; j<if_count; j++)); do
+						IFA="${IF_LIST[i]}"
+						IFB="${IF_LIST[j]}"
+						
+						# Check if rule already exists (to avoid duplicate from per-interface isolation)
+						# Actually ebtables allows duplicates but it's waste. 
+						# However, checking every rule is slow. We just append.
+						
+						ebtables -t filter -A FORWARD -i "$IFA" -o "$IFB" -j DROP
+						ebtables -t filter -A FORWARD -i "$IFB" -o "$IFA" -j DROP
+					done
+				done
+			fi
+		done
+	fi
+}
+
+fnc_iniciar()
+{
+	echo "Iniciar"
+	
+	### FALTA ESTAT BRIDGE PER NO INICIAR SI JA ESTA FUNCIONANT
+	
+	##CREAR  BRIDGE part interna
+	ip l a name br0 type bridge vlan_filtering 1
+	ip l s dev br0 up
+	
+	for LINIA in $(cat "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF" | grep -v '^#'); do
+	    VLANID=$(echo "$LINIA"|cut -d';' -f2)
+	    VLANIP=$(echo "$LINIA"|cut -d';' -f4)
+	    ip l a l  br0 name br0.$VLANID  type vlan id $VLANID
+	    ip l s dev br0.$VLANID up
+	    ip a a dev br0.$VLANID $VLANIP
+	done
+	
+	#Bridge part LAN
+	bridge vlan del dev br0 vid 1 pvid untagged self
+	for LINIA in $(cat "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_IF" | grep -v '^#'); do
+	 	NOM_IF=$(echo "$LINIA"|cut -d';' -f1)
+ 	 	VLAN_UNTAG=$(echo "$LINIA"|cut -d';' -f2)
+	 	VLAN_TAG=$(echo "$LINIA"|cut -d';' -f3)
+	 	ip l s dev $NOM_IF master br0
+	 	ip l s dev $NOM_IF up
+	 	bridge vlan del dev $NOM_IF vid 1 pvid untagged	
+	 	if [ "$VLAN_UNTAG" != "0" ]; then
+	 		bridge vlan add dev $NOM_IF vid $VLAN_UNTAG pvid untagged
+	 		bridge vlan add dev br0 vid $VLAN_UNTAG self
+	 	fi
+	 	if [ "$VLAN_TAG" != "0" ]; then
+	 		for CAMP in ${VLAN_TAG//,/ }; do
+	 			bridge vlan add dev $NOM_IF vid $CAMP 
+	 			bridge vlan add dev br0 vid $CAMP self
+			done
+	 	fi	 	 	
+	done
+
+    # Aplicar regles ebtables
+    fnc_ebtables_apply
+}
+
+fnc_aturar()
+{
+	echo "Aturar"
+	ip l d dev br0
+    # Netejar regles ebtables
+    ebtables -t filter -F FORWARD
+}
+
+
+fnc_configurar()
+{	
+
+	if [ $# -lt 1 ]; then
+		echo "falta  mostrar, guardar, esborrar"
+		exit 
+	fi
+	
+	ARG_1=$1
+	shift
+			
+	# Fem switch per executar la funció que toca
+	case "$ARG_1" in
+	  mostrar)
+	    if [ "$1" == "vlan" ]; then
+	    	cat "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF"| grep -v '^#'
+	    fi
+	    if [ "$1" == "bridge" ]; then
+	    	cat "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_IF"| grep -v '^#'
+	    fi
+	    ;;
+	  guardar)
+	  		
+	    	OPCIO_2=$1
+		shift 
+		
+	    	case "$OPCIO_2" in
+	    		vlan)
+	    		RESULTAT=$(grep -v ";$2;" "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF")
+	    		echo "$RESULTAT" > "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF"
+	    		echo "$1;$2;$3;$4;" >> "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF"
+	    		;;
+	    		bridge)
+	    		if [ "$#" -lt "3" ]; then
+	    			echo "falta nom_interfaç vid_untag (0 si no) vids-tag (0 si no)"
+	    			exit
+	    		fi
+	    		RESULTAT=$(grep -v "$1;" "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_IF")
+	    		echo "$RESULTAT" 
+	    		echo "$RESULTAT" > "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_IF"
+	    		echo "$1;$2;$3;" >> "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_IF"
+	    		;;
+	    		*)
+		    	echo "Error"
+		    	exit 1
+		    	;;
+		esac	    
+	    ;; 
+      ebtables-guardar)
+            # $1 = iface, $2 = state (0/1)
+            CONF_FILE="$DIR/$PROJECTE/$DIR_CONF/bridge_ebtables.conf"
+            IFACE="$1"
+            STATE="$2"
+            
+            if [ -z "$IFACE" ] || [ -z "$STATE" ]; then
+                echo "Error: manquen paràmetres"
+                exit 1
+            fi
+            
+            # Assegurar que el fitxer existeix
+            touch "$CONF_FILE"
+            
+            # Eliminar línia existent per aquesta interfície
+            grep -v "^$IFACE;" "$CONF_FILE" > "${CONF_FILE}.tmp"
+            
+            # Afegir la nova configuració
+            echo "$IFACE;$STATE;" >> "${CONF_FILE}.tmp"
+            mv "${CONF_FILE}.tmp" "$CONF_FILE"
+            
+            # Re-aplicar regles si el bridge està actiu
+            if ip link show br0 &>/dev/null; then
+                fnc_ebtables_apply
+            fi
+            ;;
+      ebtables-guardar-vlan)
+            # $1 = vlanid, $2 = state (0/1)
+            CONF_FILE="$DIR/$PROJECTE/$DIR_CONF/bridge_ebtables_vlan.conf"
+            VLANID="$1"
+            STATE="$2"
+            
+            if [ -z "$VLANID" ] || [ -z "$STATE" ]; then
+                echo "Error: manquen paràmetres"
+                exit 1
+            fi
+            
+            touch "$CONF_FILE"
+            
+            # Eliminar línia existent per aquesta VLAN
+            grep -v "^$VLANID;" "$CONF_FILE" > "${CONF_FILE}.tmp"
+            
+            # Afegir nova config
+            echo "$VLANID;$STATE;" >> "${CONF_FILE}.tmp"
+            mv "${CONF_FILE}.tmp" "$CONF_FILE"
+            
+            if ip link show br0 &>/dev/null; then
+                fnc_ebtables_apply
+            fi
+            ;;
+	  esborrar) 
+	    if [ "$1" == "vlan" ]; then
+	    	if [ "$2" -lt 3 ]; then
+	    		echo "no es pot esborrar la vlan $2"
+	    		exit 1
+	    	fi	    	
+	    	RESULTAT=$(grep -v ";$2;" "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF")
+	    	echo "$RESULTAT" > "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF"
+	    	echo "$RESULTAT" 
+	    fi
+	    ;;
+	  *)
+	    echo "Error"
+	    ;;
+	esac	
+}
+
+
+fnc_estat()
+{
+	if ip -br a show dev br0 &>/dev/null; then
+	     echo "$ACTIVAT"
+	     echo "subinterfaces"
+	     for LINIA in $(cat "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF" | grep -v '^#'); do
+	     	VLANID=$(echo "$LINIA"|cut -d';' -f2)
+	     	ip -4 -br a show dev br0.$VLANID
+	     done
+	     echo " " 
+	     echo "TAG, UNTAG"	     
+	     bridge vlan show
+         
+         echo " "
+         echo "EBTABLES (Aïllament)"
+         ebtables -t filter -L FORWARD --Lc
+	else
+	     echo "$DESACTIVAT"	
+	fi
+	
+	    
+}
+
+
+######################################################################
+###  MAIN
+######################################################################
+
+MSG="falta [iniciar, aturar, configurar ,estat]"
+
+# Comprovem que hi hagi almenys un argument (la opció)
+if [ $# -lt 1 ]; then
+  echo "$MSG"
+  exit 1
+fi
+
+OPCIO_1=$1
+shift
+
+# Fem switch per executar la funció que toca
+case "$OPCIO_1" in
+  iniciar)
+    fnc_iniciar  $@
+    ;;
+  aturar)
+    fnc_aturar	$@
+    ;; 
+  configurar) 
+    fnc_configurar $@
+    ;;
+  estat) 
+    fnc_estat $@
+    ;;
+  *)
+    echo "$MSG"
+    ;;
+esac
+
+

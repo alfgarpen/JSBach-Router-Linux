@@ -1,0 +1,184 @@
+#!/bin/bash
+
+######################################################################
+###  Funcions
+######################################################################
+
+fnc_copia_fitxers()
+{
+	### copiant fitxers
+	ORIGEN="../"
+	DESTI="/usr/local"
+	NOM_CARPETA=JSBach
+	DESTI_FINAL="$DESTI/$NOM_CARPETA"
+
+	echo "📁 Copiant fitxers a $DESTI_FINAL..."
+
+	# Copiar carpeta
+	cp -r "$ORIGEN" "$DESTI_FINAL"
+
+	# Assegurar propietari root:root
+	chown -R root:root "$DESTI_FINAL"
+
+	echo "🔐 Ajust de permisos de $DESTI_FINAL"
+	chmod -R 755 $DESTI_FINAL
+}
+
+
+fnc_instala_aplicacions()
+{
+	### instal·lar aplicacions
+
+	echo "⚙️ instal·lar aplicacions"
+
+	apt update
+	echo "⚙️ net-tools"
+	apt install -y net-tools
+
+	echo "⚙️ iw"
+	apt install -y iw
+
+	echo "⚙️ apache2"
+	apt install -y apache2
+
+	echo "⚙️ Activant mòdul CGI..."
+	a2enmod cgi
+
+	echo "📝 Creant configuració Apache per a JSBach CGI..."
+	cat > /etc/apache2/conf-available/jsbach-cgi.conf <<-'EOF'
+	ScriptAlias /cgi-bin/ /usr/local/JSBach/cgi-bin/
+
+	<Directory "/usr/local/JSBach/cgi-bin">
+		AllowOverride None
+		Options +ExecCGI -MultiViews +SymLinksIfOwnerMatch
+		Require all granted
+		AddHandler cgi-script .cgi
+	</Directory>
+	EOF
+
+	echo "✅ Activant configuració apache2..."
+	a2enconf jsbach-cgi
+
+	service apache2 restart
+}
+
+
+fnc_prepara_xarxa()
+{
+	### desactivar NetworkManager
+	echo "✅ desactivant NetworkManager"
+	systemctl stop NetworkManager
+	systemctl disable NetworkManager
+	
+	ls /sys/class/net | grep -v lo | xargs -n1 sudo ip addr flush dev
+	ls /sys/class/net | grep -v lo | xargs -n1 sudo ip link set down	
+
+	### eliminant ipv6 
+
+	echo "✅  Desactivant IPv6 completament del sistema"
+
+	### 1. DESACTIVAR IPv6 AL KERNEL (sysctl)
+	SYSCTL_CONF="/etc/sysctl.conf"
+	SYSCTL_BACKUP="/etc/sysctl.conf.bak"
+
+	cp "$SYSCTL_CONF" "$SYSCTL_BACKUP"
+	echo "Còpia de seguretat de sysctl creada"
+
+	# Eliminar possibles entrades anteriors
+	sed -i '/disable_ipv6/d' "$SYSCTL_CONF"
+
+	# Afegir configuració IPv6 OFF
+	cat <<-EOF >> "$SYSCTL_CONF"
+
+	# Desactivar IPv6 globalment
+	net.ipv6.conf.all.disable_ipv6 = 1
+	net.ipv6.conf.default.disable_ipv6 = 1
+	net.ipv6.conf.lo.disable_ipv6 = 1
+	EOF
+
+	# Aplicar canvis
+	sysctl -p > /dev/null
+
+	echo "✅ IPv6 desactivat al kernel"
+
+
+	echo "✅ IPv6 desactivat al DHCPCD"
+	### 2. DESACTIVAR IPv6 A DHCPCD (si existeix)
+	DHCPCD_CONF="/etc/dhcpcd.conf"
+
+	if [[ -f "$DHCPCD_CONF" ]]; then
+	  cp "$DHCPCD_CONF" "$DHCPCD_CONF.bak"
+	  echo "Còpia de seguretat de dhcpcd.conf creada"
+
+	  sed -i '/^ipv6/d;/^noipv6/d;/^slaac/d;/^ia_na/d;/^ia_pd/d' "$DHCPCD_CONF"
+
+	  echo -e "\n# Desactivar IPv6\nnoipv6" >> "$DHCPCD_CONF"
+
+	  systemctl restart dhcpcd 2>/dev/null
+	  echo "dhcpcd reiniciat"
+	fi
+}
+
+
+fnc_instala_servei()
+{
+	### activar JSBach
+	echo "✅ activar JSBach"
+	cp ./jsbach_srv.service  /etc/systemd/system/jsbach_srv.service
+	chmod 644 /etc/systemd/system/jsbach_srv.service
+	chown root:root /etc/systemd/system/jsbach_srv.service
+	systemctl daemon-reexec
+	systemctl daemon-reload
+	systemctl enable jsbach_srv.service
+	systemctl start jsbach_srv.service
+
+
+	echo "✅ Instal·lació completada correctament"
+	echo "✅ Es recomana anar a http://127.0.0.1/cgi-bin/main.cgi  i triar la targeta ifwan al menu wan"
+}
+
+
+######################################################################
+###  Main
+######################################################################
+
+if [[ "$EUID" -ne 0 ]]; then
+	echo "Aquest script s'ha d'executar com a root" >&2
+	exit 1
+fi
+
+# si no hi ha arguments ho fat tot
+if [ $# -lt 1 ]; then
+	fnc_copia_fitxers
+	fnc_instala_aplicacions
+	fnc_prepara_xarxa
+	fnc_instala_servei
+	exit 1
+fi
+
+OPCIO_1=$1
+shift
+
+# Fem switch per executar la funció que toca
+case "$OPCIO_1" in
+  -f)
+    fnc_copia_fitxers 
+    ;;
+  -a)
+    fnc_instala_aplicacions
+    ;; 
+  -x) 
+    fnc_prepara_xarxa
+    ;;
+  -s) 
+    fnc_instala_servei
+    ;;
+  *)
+    echo "-f sols instal·la els fitxer"
+    echo "-a sols instal·la les aplicacion amb apt"
+    echo "-x sols prepara els parametres de xarxa i elimina ipv6"
+    echo "-s sols instal·la i arranca el servei jsbach_srv"
+    ;;
+esac
+
+
