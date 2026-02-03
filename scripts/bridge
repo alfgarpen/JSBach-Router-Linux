@@ -12,6 +12,9 @@ fnc_ebtables_apply()
 	# Flush ebtables filter table (FORWARD chain)
 	ebtables -t filter -F FORWARD
 
+	# Track applied rules to avoid duplicates: "IF1_IF2"
+	declare -A APPLIED_RULES
+
 	# ------------------------------------------------------------------
 	# 1. Interface Isolation (Existing)
 	# ------------------------------------------------------------------
@@ -43,12 +46,15 @@ fnc_ebtables_apply()
 				# Drop BIDIRECTIONAL between isolated ports
 				ebtables -t filter -A FORWARD -i "$IF1" -o "$IF2" -j DROP
 				ebtables -t filter -A FORWARD -i "$IF2" -o "$IF1" -j DROP
+				
+				APPLIED_RULES["${IF1}_${IF2}"]="1"
+				APPLIED_RULES["${IF2}_${IF1}"]="1"
 			done
 		done
 	fi
 
 	# ------------------------------------------------------------------
-	# 2. VLAN Isolation (New)
+	# 2. VLAN Isolation (Improved)
 	# ------------------------------------------------------------------
 	
 	VLAN_CONF_FILE="$DIR/$PROJECTE/$DIR_CONF/bridge_ebtables_vlan.conf"
@@ -56,7 +62,7 @@ fnc_ebtables_apply()
 	
 	if [ -f "$VLAN_CONF_FILE" ] && [ -f "$BRIDGE_IF_FILE" ]; then
 		
-		# Read VLAN isolation states into an associative array
+		# Read VLAN isolation states
 		declare -A VLAN_ISOLATION_MAP
 		while IFS=';' read -r vlanid state _; do
 			[[ "$vlanid" =~ ^#.*$ ]] && continue
@@ -66,38 +72,77 @@ fnc_ebtables_apply()
 			fi
 		done < "$VLAN_CONF_FILE"
 		
-		# Read Interfaces and their UNTAG VLAN
-		# We group interfaces by VLAN: VLAN_MEMBERS["vlanid"]="if1 if2 ..."
-		declare -A VLAN_MEMBERS
+		# Group interfaces by VLAN and Mode
+		# VLAN_MEMBERS_UNTAG["vlanid"] = "iface1 iface2 ..."
+		# VLAN_MEMBERS_TAG["vlanid"] = "iface3 iface4 ..."
+		declare -A VLAN_MEMBERS_UNTAG
+		declare -A VLAN_MEMBERS_TAG
 		
 		while IFS=';' read -r iface untag tag _; do
 			[[ "$iface" =~ ^#.*$ ]] && continue
 			[ -z "$iface" ] && continue
 			
-			# If untag is not empty and not 0, add to map
+			# Untagged membership
 			if [ -n "$untag" ] && [ "$untag" != "0" ]; then
-				VLAN_MEMBERS["$untag"]+="$iface "
+				VLAN_MEMBERS_UNTAG["$untag"]+="$iface "
+			fi
+			
+			# Tagged membership (can be comma separated)
+			if [ -n "$tag" ] && [ "$tag" != "0" ]; then
+				for t in ${tag//,/ }; do
+					VLAN_MEMBERS_TAG["$t"]+="$iface "
+				done
 			fi
 		done < "$BRIDGE_IF_FILE"
 		
-		# Iterate over isolated VLANs and apply rules
+		# Iterate over isolated VLANs
 		for vlanid in "${!VLAN_ISOLATION_MAP[@]}"; do
-			# Get interfaces for this VLAN
-			read -r -a IF_LIST <<< "${VLAN_MEMBERS[$vlanid]}"
-			local if_count=${#IF_LIST[@]}
+			# Collect all members
+			read -r -a UNTAG_LIST <<< "${VLAN_MEMBERS_UNTAG[$vlanid]}"
+			read -r -a TAG_LIST <<< "${VLAN_MEMBERS_TAG[$vlanid]}"
 			
-			if [ "$if_count" -ge 2 ]; then
-				for ((i=0; i<if_count; i++)); do
-					for ((j=i+1; j<if_count; j++)); do
-						IFA="${IF_LIST[i]}"
-						IFB="${IF_LIST[j]}"
+			# Combine into a single list of objects (interface:type)
+			# type: u=untag, t=tag
+			declare -a MEMBERS
+			MEMBERS=()
+			
+			for curidx in "${UNTAG_LIST[@]}"; do MEMBERS+=("${curidx}:u"); done
+			for curidx in "${TAG_LIST[@]}"; do MEMBERS+=("${curidx}:t"); done
+			
+			local count=${#MEMBERS[@]}
+			
+			if [ "$count" -ge 2 ]; then
+				# echo "Applying isolation for VLAN $vlanid ($count members)"
+				
+				for ((i=0; i<count; i++)); do
+					for ((j=i+1; j<count; j++)); do
+						IFS=':' read -r IF1 TYPE1 <<< "${MEMBERS[i]}"
+						IFS=':' read -r IF2 TYPE2 <<< "${MEMBERS[j]}"
 						
-						# Check if rule already exists (to avoid duplicate from per-interface isolation)
-						# Actually ebtables allows duplicates but it's waste. 
-						# However, checking every rule is slow. We just append.
+						# Avoid duplicates if already isolated by interface-level
+						KEY1="${IF1}_${IF2}"
+						if [ "${APPLIED_RULES[$KEY1]}" == "1" ]; then
+							continue # Already blocked everything between these two
+						fi
 						
-						ebtables -t filter -A FORWARD -i "$IFA" -o "$IFB" -j DROP
-						ebtables -t filter -A FORWARD -i "$IFB" -o "$IFA" -j DROP
+						MATCH1="-i $IF1"
+						if [ "$TYPE1" == "u" ]; then
+							MATCH1="$MATCH1 -p ! 802_1Q"
+						else
+							MATCH1="$MATCH1 -p 802_1Q --vlan-id $vlanid"
+						fi
+						
+						MATCH2="-i $IF2"
+						if [ "$TYPE2" == "u" ]; then
+							MATCH2="$MATCH2 -p ! 802_1Q"
+						else
+							MATCH2="$MATCH2 -p 802_1Q --vlan-id $vlanid"
+						fi
+						
+						# Forward A->B
+						ebtables -t filter -A FORWARD $MATCH1 -o $IF2 -j DROP
+						# Forward B->A
+						ebtables -t filter -A FORWARD $MATCH2 -o $IF1 -j DROP
 					done
 				done
 			fi
