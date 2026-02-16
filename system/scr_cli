@@ -25,6 +25,9 @@ do
 			    ;;
 			"dmz")
 			    $DIR/$PROJECTE/$DIR_SCRIPTS/dmz $Arguments
+			    ;;
+			"switch")
+			    $DIR/$PROJECTE/$DIR_SCRIPTS/switch $Arguments
 			    ;;			
 			*) 
 			    echo "CLI Error en l'argument $Comando $Arguments"

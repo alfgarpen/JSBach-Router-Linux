@@ -1,0 +1,269 @@
+#!/bin/bash
+
+source /usr/local/JSBach/conf/variables.conf 2>/dev/null
+CONF_FILE="/usr/local/JSBach/conf/switchs.conf"
+MACS_BLOCK_FILE="/usr/local/JSBach/conf/macs_bloqueig.conf"
+
+######################################################################
+###  Funcions
+######################################################################
+
+fnc_estat() {
+    if [ -f "$CONF_FILE" ]; then
+        while IFS=";" read -r nombre ip usuario pass; do
+            [[ "$nombre" =~ ^#.*$ ]] && continue
+            [[ -z "$nombre" ]] && continue
+
+            # Ping the switch
+            ping_output=$(ping -c 1 -W 1 "$ip" 2>&1)
+            
+            if [ $? -eq 0 ]; then
+                estado="<span class='active'>Actiu</span>"
+                tiempo=$(echo "$ping_output" | grep "time=" | sed -E 's/.*time=([0-9\.]+) ms.*/\1 ms/')
+            else
+                estado="<span class='inactive'>Inactiu</span>"
+                tiempo="-"
+            fi
+
+            echo "<tr>"
+            echo "<td>$nombre</td>"
+            echo "<td><a href='http://$ip'>$ip</a></td>"
+            echo "<td>$estado</td>"
+            echo "<td>$tiempo</td>"
+            echo "</tr>"
+        done < "$CONF_FILE"
+    else
+        echo "<tr><td colspan='4'>No s'ha trobat el fitxer de configuració ($CONF_FILE).</td></tr>"
+    fi
+}
+
+fnc_macs() {
+    if [ -f "$CONF_FILE" ]; then
+        while IFS=";" read -r nombre ip usuario pass; do
+            [[ "$nombre" =~ ^#.*$ ]] && continue
+            [[ -z "$nombre" ]] && continue
+            
+            # Use expect to connect and get mac table
+            # Use expect to connect interactively via telnet and get mac table
+            output=$(expect -c "
+                set timeout 20
+                spawn telnet $ip
+                expect \"User:\"
+                send \"$usuario\r\"
+                expect \"Password:\"
+                send \"$pass\r\"
+                sleep 1
+                send \"\r\"
+                expect -re \"(>|#)\"
+                send \"enable\r\"
+                expect {
+                    \"Password:\" { send \"$pass\r\"; exp_continue }
+                    -re \"#\" { }
+                }
+                send \"terminal length 0\r\"
+                expect -re \"#\"
+                send \"show mac address-table\r\"
+                expect -re \"#\"
+                send \"exit\r\"
+                expect eof
+            ")
+            
+            echo "$output" | while read -r line; do
+                if [[ "$line" =~ ([0-9a-fA-F]{2}[:-]?){5}[0-9a-fA-F]{2} ]] || [[ "$line" =~ [0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4} ]]; then
+                    # TP-Link format: MAC VLAN PORT TYPE AGING
+                    # e.g.: 00:e0:4c:68:00:be  1       Gi1/0/1  dynamic         aging
+                    mac=$(echo "$line" | awk '{print $1}')
+                    vlan=$(echo "$line" | awk '{print $2}')
+                    port=$(echo "$line" | awk '{print $3}')
+                    
+                    # Fallback for other formats if needed, or stick to this if consistent
+                    # If extraction failed (empty), use placeholder
+                    [[ -z "$port" ]] && port="-"
+                    [[ -z "$vlan" ]] && vlan="-"
+
+                    echo "<tr>"
+                    echo "<td>$nombre</td>"
+                    echo "<td>$mac</td>"
+                    echo "<td>$port</td>"
+                    echo "<td>$vlan</td>"
+                    echo "</tr>"
+                fi
+            done
+            
+        done < "$CONF_FILE"
+    else
+        echo "<tr><td colspan='4'>No s'ha trobat el fitxer de configuració.</td></tr>"
+    fi
+}
+
+fnc_bloqueig() {
+    action=$1
+    if [ -z "$action" ]; then
+        echo "Error: action required (apply/remove)"
+        exit 1
+    fi
+
+    if [ ! -f "$MACS_BLOCK_FILE" ]; then
+        echo "Creant fitxer de MACs a bloquejar buit ($MACS_BLOCK_FILE)..."
+        touch "$MACS_BLOCK_FILE"
+    fi
+
+    if [ -f "$CONF_FILE" ]; then
+        while IFS=";" read -r nombre ip usuario pass; do
+            [[ "$nombre" =~ ^#.*$ ]] && continue
+            [[ -z "$nombre" ]] && continue
+            
+            echo "Connectant amb switch: $nombre ($ip)..."
+            
+            cmds=""
+            if [ "$action" == "apply" ]; then
+                while read -r mac_to_block; do
+                    [[ "$mac_to_block" =~ ^#.*$ ]] && continue
+                    [[ -z "$mac_to_block" ]] && continue
+                    cmds="$cmds\nmac address-table static $mac_to_block drop"
+                done < "$MACS_BLOCK_FILE"
+            elif [ "$action" == "remove" ]; then
+                 while read -r mac_to_block; do
+                    [[ "$mac_to_block" =~ ^#.*$ ]] && continue
+                    [[ -z "$mac_to_block" ]] && continue
+                    cmds="$cmds\nno mac address-table static $mac_to_block drop"
+                done < "$MACS_BLOCK_FILE"
+            fi
+            
+            if [ -n "$cmds" ]; then
+                 expect -c "
+                    set timeout 20
+                    spawn telnet $ip
+                    expect \"User:\"
+                    send \"$usuario\r\"
+                    expect \"Password:\"
+                    send \"$pass\r\"
+                    sleep 1
+                    send \"\r\"
+                    expect -re \"(>|#)\"
+                    send \"enable\r\"
+                    expect {
+                        \"Password:\" { send \"$pass\r\"; exp_continue }
+                        -re \"#\" { }
+                    }
+                    sleep 1
+                    send \"configure\r\"
+                    expect -re \"(config)#\"
+                    send \"$cmds\r\"
+                    send \"end\r\"
+                    send \"exit\r\"
+                    expect eof
+                "
+                if [ $? -eq 0 ]; then
+                    echo "Operació completada correctament."
+                else
+                    echo "Error durant la connexió o execució."
+                fi
+            else
+                echo "No hi ha regles per aplicar."
+            fi
+            echo "------------------------------------------------"
+        done < "$CONF_FILE"
+    else
+         echo "No s'ha trobat el fitxer de configuració dels switches."
+    fi
+}
+
+fnc_test() {
+    if [ -f "$CONF_FILE" ]; then
+        while IFS=";" read -r nombre ip usuario pass; do
+            [[ "$nombre" =~ ^#.*$ ]] && continue
+            [[ -z "$nombre" ]] && continue
+            
+            echo "Testing $nombre ($ip)..."
+            if ping -c 3 -W 1 "$ip"; then
+                echo "Resultat: CONNECTIVITAT OK"
+            else
+                echo "Resultat: FALLADA DE CONNEXIÓ"
+            fi
+            echo "----------------------------------------"
+        done < "$CONF_FILE"
+    else
+        echo "No s'ha trobat el fitxer de configuració."
+    fi
+}
+
+fnc_guardar() {
+    nom=$1
+    ip=$2
+    user=$3
+    pass=$4
+
+    if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Error: Adreça IP invàlida."
+        exit 1
+    fi
+
+    if grep -q "$ip" "$CONF_FILE"; then
+        echo "Error: Ja existeix un switch amb aquesta IP."
+        exit 1
+    fi
+
+    if grep -q "$nom" "$CONF_FILE"; then
+        echo "Error: Ja existeix un switch amb aquest nom."
+        exit 1
+    fi
+
+    echo "$nom;$ip;$user;$pass" >> "$CONF_FILE"
+    if [ $? -eq 0 ]; then
+        echo "OK"
+    else
+        echo "Error: no s'ha pogut escriure al fitxer."
+        exit 1
+    fi
+}
+
+fnc_eliminar() {
+    delete_ip=$1
+    if [ -f "$CONF_FILE" ]; then
+        grep -v ";$delete_ip;" "$CONF_FILE" > "${CONF_FILE}.tmp"
+        mv "${CONF_FILE}.tmp" "$CONF_FILE"
+        chmod 666 "$CONF_FILE"
+        echo "OK"
+    else
+        echo "Error: No existeix el fitxer de configuració."
+        exit 1
+    fi
+}
+
+######################################################################
+###  MAIN
+######################################################################
+
+if [ $# -lt 1 ]; then
+  echo "falta opció (estat, macs, bloqueig, test, guardar, eliminar)"
+  exit 1
+fi
+
+OPCIO=$1
+shift
+
+case "$OPCIO" in
+  estat)
+    fnc_estat
+    ;;
+  macs)
+    fnc_macs
+    ;;
+  bloqueig)
+    fnc_bloqueig "$@"
+    ;;
+  test)
+    fnc_test
+    ;;
+  guardar)
+    fnc_guardar "$@"
+    ;;
+  eliminar)
+    fnc_eliminar "$@"
+    ;;
+  *)
+    echo "Opció desconeguda"
+    exit 1
+    ;;
+esac

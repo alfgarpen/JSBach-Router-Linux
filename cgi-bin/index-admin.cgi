@@ -127,6 +127,10 @@ function dmz(){
 window.top.frames['menu'].location.href='/cgi-bin/dmz-menu.cgi';
 window.top.frames['body'].location.href='/cgi-bin/dmz.cgi?comand=estat&';
 }
+function switchs(){
+window.top.frames['menu'].location.href='/cgi-bin/switch-menu.cgi';
+window.top.frames['body'].location.href='/cgi-bin/switch.cgi';
+}
 </script>
 
 <table width="100%">
@@ -139,6 +143,7 @@ window.top.frames['body'].location.href='/cgi-bin/dmz.cgi?comand=estat&';
       <button onclick="bridge()">BRIDGE</button>    
       <button onclick="tallafocs()">TALLAFOCS</button> 
       <button onclick="dmz()">DMZ</button> 
+      <button onclick="switchs()">SWITCH</button> 
   </tr>
 </table>
 
