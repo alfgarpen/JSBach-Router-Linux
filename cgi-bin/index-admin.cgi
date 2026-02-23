@@ -86,6 +86,23 @@ button:active {
   box-shadow: 0 3px 10px rgba(34, 211, 238, 0.4);
 }
 
+/* Botó de logout */
+.btn-logout {
+  background: linear-gradient(135deg, #7f1d1d, #ef4444) !important;
+  box-shadow: 0 4px 15px rgba(239, 68, 68, 0.5) !important;
+  margin-left: auto;
+}
+.btn-logout:hover {
+  box-shadow: 0 6px 22px rgba(239, 68, 68, 0.8) !important;
+}
+
+/* Fila de botons: espai entre nav i logout */
+.nav-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
 /* Links heredados del body */
 a {
   color: #e9ab17;
@@ -133,19 +150,16 @@ window.top.frames['body'].location.href='/cgi-bin/switch.cgi';
 }
 </script>
 
-<table width="100%">
-  <tr>
-    <td>
-      <!-- Botons esquerra -->
-      <button onclick="main()">Main Menu</button>
-      <button onclick="wan()">WAN</button>
-      <button onclick="enrutar()">ENRUTAR</button> 
-      <button onclick="bridge()">BRIDGE</button>    
-      <button onclick="tallafocs()">TALLAFOCS</button> 
-      <button onclick="dmz()">DMZ</button> 
-      <button onclick="switchs()">SWITCH</button> 
-  </tr>
-</table>
+<div class="nav-row">
+  <button onclick="main()">Main Menu</button>
+  <button onclick="wan()">WAN</button>
+  <button onclick="enrutar()">ENRUTAR</button>
+  <button onclick="bridge()">BRIDGE</button>
+  <button onclick="tallafocs()">TALLAFOCS</button>
+  <button onclick="dmz()">DMZ</button>
+  <button onclick="switchs()">SWITCH</button>
+  <button class="btn-logout" onclick="window.top.location.href='/cgi-bin/logout.cgi'">🔒 Tancar sessió</button>
+</div>
 
 </body>
 </html>

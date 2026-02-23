@@ -1,7 +1,13 @@
 #!/bin/bash
 
-
 source /usr/local/JSBach/conf/variables.conf
+source /usr/local/JSBach/conf/auth.sh
+
+# ── Protecció: requereix sessió vàlida ────────────────────────
+check_session
+
+echo "Content-Type: text/html; charset=utf-8"
+echo ""
 
 /bin/cat << EOM
 
