@@ -148,6 +148,10 @@ function switchs(){
 window.top.frames['menu'].location.href='/cgi-bin/switch-menu.cgi';
 window.top.frames['body'].location.href='/cgi-bin/switch.cgi';
 }
+function dhcp(){
+window.top.frames['menu'].location.href='/cgi-bin/dhcp-menu.cgi';
+window.top.frames['body'].location.href='/cgi-bin/dhcp.cgi?comand=estat';
+}
 </script>
 
 <div class="nav-row">
@@ -158,6 +162,7 @@ window.top.frames['body'].location.href='/cgi-bin/switch.cgi';
   <button onclick="tallafocs()">TALLAFOCS</button>
   <button onclick="dmz()">DMZ</button>
   <button onclick="switchs()">SWITCH</button>
+  <button onclick="dhcp()">DHCP</button>
   <button class="btn-logout" onclick="window.top.location.href='/cgi-bin/logout.cgi'">🔒 Tancar sessió</button>
 </div>
 
