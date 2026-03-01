@@ -38,6 +38,32 @@ fnc_instala_aplicacions()
 	echo "⚙️ iw"
 	apt install -y iw
 
+	echo "⚙️ hostapd (WiFi AP)"
+	apt install -y hostapd
+
+	echo "⚙️ dnsmasq (DHCPv4 Server)"
+	apt install -y dnsmasq
+
+	echo "⚙️ dhcpcd5 (DHCP Client CLI)"
+	apt install -y dhcpcd5
+
+	echo "⚙️ iptables (Firewall / NAT)"
+	apt install -y iptables
+
+	echo "⚙️ iproute2 (IP/VLAN/Bridge management)"
+	apt install -y iproute2
+
+	echo "⚙️ ebtables (L2 Bridge Firewall)"
+	apt install -y ebtables
+
+	echo "⚙️ netcat-openbsd (JSBach IPC Backend)"
+	apt install -y netcat-openbsd
+
+	# Prevent services from starting automatically if JSBach manages them
+	echo "⛔ Desactivant inici automàtic de serveis gestionats per JSBach..."
+	systemctl disable hostapd
+	systemctl disable dnsmasq
+
 	echo "⚙️ apache2"
 	apt install -y apache2
 
