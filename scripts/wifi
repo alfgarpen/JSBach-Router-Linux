@@ -1,0 +1,259 @@
+#!/bin/bash
+
+# Funcions per a la wifi
+source /usr/local/JSBach/conf/variables.conf
+
+WIFI_IFACE=""
+# Detect WiFi interface dynamically
+for iface in $(iw dev | grep Interface | awk '{print $2}'); do
+    WIFI_IFACE=$iface
+    break
+done
+
+fnc_iniciar() {
+    echo "Iniciant hostapd..."
+    systemctl start hostapd
+    echo "hostapd iniciat"
+}
+
+fnc_aturar() {
+    echo "Aturant hostapd..."
+    systemctl stop hostapd
+    echo "hostapd aturat"
+}
+
+fnc_reiniciar() {
+    echo "Reiniciant hostapd..."
+    systemctl restart hostapd
+    echo "hostapd reiniciat"
+}
+
+fnc_estat() {
+    echo "=============================="
+    echo " Estat del servei WiFi"
+    echo "=============================="
+    if systemctl is-active --quiet hostapd; then
+        echo "hostapd: $ACTIVAT"
+    else
+        echo "hostapd: $DESACTIVAT"
+    fi
+    echo ""
+    echo "Interfície Sense Fils Detectada: ${WIFI_IFACE:-Cap interfície sense fils detectada}"
+    
+    if [ -n "$WIFI_IFACE" ]; then
+        if iw list | grep -q 'AP'; then
+            echo "Suport AP: SÍ"
+        else
+            echo "Suport AP: NO (El adaptador no suporta mode Access Point)"
+        fi
+        
+        # Check if interface is in a bridge
+        MASTER=$(ip link show dev "$WIFI_IFACE" | grep 'master' | awk '{for(i=1;i<=NF;i++) if($i=="master") print $(i+1)}')
+        if [ -n "$MASTER" ]; then
+            echo "Estat Bridge: Associada a '$MASTER'"
+        else
+            echo "Estat Bridge: Sense bridge associat"
+        fi
+    fi
+}
+
+fnc_config_ap_read() {
+    if [ -f /etc/hostapd/hostapd.conf ]; then
+        cat /etc/hostapd/hostapd.conf | grep -E '^(ssid|channel|hw_mode|country_code|wpa=|wpa_passphrase)='
+    fi
+}
+
+fnc_config_ap_save() {
+    SSID=$1
+    CHANNEL=$2
+    HW_MODE=$3
+    COUNTRY=$4
+    WPA=$5
+    WPA_PASS=$6
+
+    if [ ! -f /etc/hostapd/hostapd.conf ]; then
+        echo "L'arxiu /etc/hostapd/hostapd.conf no existeix. Es crearà un nou."
+        touch /etc/hostapd/hostapd.conf
+        echo "interface=$WIFI_IFACE" > /etc/hostapd/hostapd.conf
+        echo "logger_syslog=-1" >> /etc/hostapd/hostapd.conf
+        echo "logger_syslog_level=2" >> /etc/hostapd/hostapd.conf
+        echo "logger_stdout=-1" >> /etc/hostapd/hostapd.conf
+        echo "logger_stdout_level=2" >> /etc/hostapd/hostapd.conf
+    fi
+
+    # Update or add attributes
+    sed -i -E "s/^ssid=.*/ssid=$SSID/" /etc/hostapd/hostapd.conf
+    grep -q "^ssid=" /etc/hostapd/hostapd.conf || echo "ssid=$SSID" >> /etc/hostapd/hostapd.conf
+
+    sed -i -E "s/^channel=.*/channel=$CHANNEL/" /etc/hostapd/hostapd.conf
+    grep -q "^channel=" /etc/hostapd/hostapd.conf || echo "channel=$CHANNEL" >> /etc/hostapd/hostapd.conf
+
+    sed -i -E "s/^hw_mode=.*/hw_mode=$HW_MODE/" /etc/hostapd/hostapd.conf
+    grep -q "^hw_mode=" /etc/hostapd/hostapd.conf || echo "hw_mode=$HW_MODE" >> /etc/hostapd/hostapd.conf
+
+    sed -i -E "s/^country_code=.*/country_code=$COUNTRY/" /etc/hostapd/hostapd.conf
+    grep -q "^country_code=" /etc/hostapd/hostapd.conf || echo "country_code=$COUNTRY" >> /etc/hostapd/hostapd.conf
+
+    # Only set WPA parameters if wpa > 0
+    if [ -n "$WPA" ] && [ "$WPA" != "0" ]; then
+        sed -i -E "s/^wpa=.*/wpa=$WPA/" /etc/hostapd/hostapd.conf
+        grep -q "^wpa=" /etc/hostapd/hostapd.conf || echo "wpa=$WPA" >> /etc/hostapd/hostapd.conf
+
+        sed -i -E "s/^wpa_passphrase=.*/wpa_passphrase=$WPA_PASS/" /etc/hostapd/hostapd.conf
+        grep -q "^wpa_passphrase=" /etc/hostapd/hostapd.conf || echo "wpa_passphrase=$WPA_PASS" >> /etc/hostapd/hostapd.conf
+        
+        grep -q "^wpa_key_mgmt=" /etc/hostapd/hostapd.conf || echo "wpa_key_mgmt=WPA-PSK" >> /etc/hostapd/hostapd.conf
+        grep -q "^wpa_pairwise=" /etc/hostapd/hostapd.conf || echo "wpa_pairwise=TKIP CCMP" >> /etc/hostapd/hostapd.conf
+        grep -q "^rsn_pairwise=" /etc/hostapd/hostapd.conf || echo "rsn_pairwise=CCMP" >> /etc/hostapd/hostapd.conf
+    else
+        sed -i -E "/^wpa=/d" /etc/hostapd/hostapd.conf
+        sed -i -E "/^wpa_passphrase=/d" /etc/hostapd/hostapd.conf
+    fi
+
+    echo "Configuració de Acces Point desada"
+    echo "Reiniciant hostapd..."
+    systemctl restart hostapd
+    echo "hostapd reiniciat"
+}
+
+fnc_config_xarxa_read() {
+    if [ -n "$WIFI_IFACE" ]; then
+        MASTER=$(ip link show dev "$WIFI_IFACE" | grep 'master' | awk '{for(i=1;i<=NF;i++) if($i=="master") print $(i+1)}')
+        echo "$MASTER"
+    fi
+}
+
+fnc_config_xarxa_save() {
+    BRIDGE=$1
+    if [ -z "$WIFI_IFACE" ]; then
+        echo "Error: Cap interfície WiFi detectada"
+        return 1
+    fi
+
+    ip link set dev "$WIFI_IFACE" nomaster 2>/dev/null
+
+    if [ -n "$BRIDGE" ]; then
+        if ip link show dev "$BRIDGE" >/dev/null 2>&1; then
+            ip link set dev "$WIFI_IFACE" master "$BRIDGE"
+            echo "La interfície $WIFI_IFACE s'ha associat al bridge $BRIDGE"
+        else
+            echo "Error: El bridge '$BRIDGE' no existeix."
+            return 1
+        fi
+    else
+        echo "La interfície $WIFI_IFACE s'ha desvinculat de qualsevol bridge."
+    fi
+}
+
+fnc_diagnostic_bridges() {
+    ip -br link | grep bridge
+}
+
+fnc_config_dhcp_read() {
+    if [ -n "$WIFI_IFACE" ]; then
+        CONF_FILE="/etc/dnsmasq.conf"
+        if [ ! -f "$CONF_FILE" ]; then
+            echo ""
+            return
+        fi
+
+        local line_range=$(grep -E "^interface=$WIFI_IFACE" -A 1 "$CONF_FILE" | grep "^dhcp-range")
+        if [ -n "$line_range" ]; then
+            local range_ini=$(echo "$line_range" | cut -d'=' -f2 | cut -d',' -f1)
+            local range_fi=$(echo "$line_range" | cut -d',' -f2)
+            local lease=$(echo "$line_range" | cut -d',' -f4 | cut -d' ' -f1)
+            local gw=$(grep "^dhcp-option=interface:$WIFI_IFACE,option:router" "$CONF_FILE" | cut -d',' -f3)
+            local dns=$(grep "^dhcp-option=interface:$WIFI_IFACE,option:dns-server" "$CONF_FILE" | cut -d',' -f3)
+            echo "ACTIVAT $range_ini $range_fi $lease $gw $dns"
+        else
+            echo "DESACTIVAT"
+        fi
+    fi
+}
+
+fnc_config_dhcp_save() {
+    STATUS=$1
+    R_INI=$2
+    R_FI=$3
+    LEASE=$4
+    GW=$5
+    DNS=$6
+
+    CONF_FILE="/etc/dnsmasq.conf"
+    BACKUP_FILE="/etc/dnsmasq.conf.bak"
+    touch "$CONF_FILE"
+    cp "$CONF_FILE" "$BACKUP_FILE"
+
+    if [ "$STATUS" = "1" ]; then
+        sed -i "/^interface=$WIFI_IFACE/d" "$CONF_FILE"
+        sed -i "\/^dhcp-range=.*#$WIFI_IFACE/d" "$CONF_FILE"
+        sed -i "/^dhcp-option=interface:$WIFI_IFACE/d" "$CONF_FILE"
+
+        echo "interface=$WIFI_IFACE" >> "$CONF_FILE"
+        echo "dhcp-range=$R_INI,$R_FI,255.255.255.0,$LEASE #$WIFI_IFACE" >> "$CONF_FILE"
+        echo "dhcp-option=interface:$WIFI_IFACE,option:router,$GW" >> "$CONF_FILE"
+        echo "dhcp-option=interface:$WIFI_IFACE,option:dns-server,$DNS" >> "$CONF_FILE"
+        echo "Servidor DHCP activat per la interfície $WIFI_IFACE."
+    else
+        sed -i "/^interface=$WIFI_IFACE/d" "$CONF_FILE"
+        sed -i "\/^dhcp-range=.*#$WIFI_IFACE/d" "$CONF_FILE"
+        sed -i "/^dhcp-option=interface:$WIFI_IFACE/d" "$CONF_FILE"
+        echo "Servidor DHCP desactivat per la interfície $WIFI_IFACE."
+    fi
+
+    if dnsmasq --test > /dev/null 2>&1; then
+        systemctl restart dnsmasq
+        echo "dnsmasq reiniciat correctament."
+    else
+        echo "ERROR: Sintaxi de dnsmasq incorrecta. Restaurat backup."
+        cp "$BACKUP_FILE" "$CONF_FILE"
+    fi
+}
+
+fnc_diagnostic() {
+    echo "=============================="
+    echo " Interfícies IP"
+    echo "=============================="
+    ip -br a
+    echo ""
+    echo "=============================="
+    echo " Informació Wireless (iw dev)"
+    echo "=============================="
+    iw dev
+    echo ""
+    if [ -n "$WIFI_IFACE" ]; then
+        echo "=============================="
+        echo " Clients Connectats"
+        echo "=============================="
+        iw dev "$WIFI_IFACE" station dump
+    fi
+    echo ""
+    echo "=============================="
+    echo " Servei hostapd"
+    echo "=============================="
+    systemctl status hostapd --no-pager
+}
+
+if [ -z "$1" ]; then
+    echo "Falta paràmetre de comanda"
+    exit 1
+fi
+
+COMMAND=$1
+shift
+
+case "$COMMAND" in
+    iniciar) fnc_iniciar ;;
+    aturar) fnc_aturar ;;
+    reiniciar) fnc_reiniciar ;;
+    estat) fnc_estat ;;
+    config_ap_read) fnc_config_ap_read ;;
+    config_ap_save) fnc_config_ap_save "$1" "$2" "$3" "$4" "$5" "$6" ;;
+    config_xarxa_read) fnc_config_xarxa_read ;;
+    config_xarxa_save) fnc_config_xarxa_save "$1" ;;
+    diagnostic_bridges) fnc_diagnostic_bridges ;;
+    config_dhcp_read) fnc_config_dhcp_read ;;
+    config_dhcp_save) fnc_config_dhcp_save "$1" "$2" "$3" "$4" "$5" "$6" ;;
+    diagnostic) fnc_diagnostic ;;
+    *) echo "Comanda desconeguda: $COMMAND" ;;
+esac

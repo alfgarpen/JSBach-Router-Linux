@@ -105,6 +105,7 @@ h1 {
     <button onclick="window.top.frames['menu'].location.href='/cgi-bin/bridge-menu.cgi'">VLAN / Bridge</button>
     <button onclick="window.top.frames['menu'].location.href='/cgi-bin/enrutar-menu.cgi'">Enrutament</button>
     <button onclick="window.top.frames['menu'].location.href='/cgi-bin/tallafocs-menu.cgi'">Tallafocs</button>
+    <button onclick="window.top.frames['menu'].location.href='/cgi-bin/wifi-menu.cgi'">WiFi</button>
   </div>
 </div>
 
