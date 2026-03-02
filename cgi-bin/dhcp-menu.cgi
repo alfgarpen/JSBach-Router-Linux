@@ -89,6 +89,10 @@ a {
       <div class="button">Iniciar Servei</div>
     </a>
 
+    <a href="/cgi-bin/dhcp.cgi?comand=reiniciar" target="body">
+      <div class="button">Reiniciar Servei</div>
+    </a>
+
     <a href="/cgi-bin/dhcp.cgi?comand=aturar" target="body">
       <div class="button danger">Aturar Servei</div>
     </a>

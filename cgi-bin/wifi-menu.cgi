@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source /usr/local/JSBach/conf/variables.conf
+echo "Content-Type:text/html;charset=utf-8"
 
 /bin/cat << EOM
 

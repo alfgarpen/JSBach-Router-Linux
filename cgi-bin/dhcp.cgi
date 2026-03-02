@@ -95,6 +95,15 @@ case "$comand" in
         fi
         ;;
 
+        reiniciar)
+        echo "<h1>Reiniciant Servei...</h1>"
+        if bash "$DHCP_SCRIPT" reiniciar; then
+            echo "<p class='msg-success'>Servei reiniciat correctament.</p>"
+        else
+            echo "<p class='msg-error'>Error al reiniciar el servei.</p>"
+        fi
+        ;;
+
     aturar)
         echo "<h1>Aturant Servei...</h1>"
         if bash "$DHCP_SCRIPT" aturar; then
