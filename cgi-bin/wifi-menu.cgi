@@ -114,6 +114,10 @@ a {
       <div class="button">Configuració DHCP</div>
     </a>
 
+    <a href="/cgi-bin/wifi.cgi?comand=fix_apply" target="body">
+      <div class="button danger">⚡ Aplicar Correccions (bridge + dnsmasq)</div>
+    </a>
+
     <a href="/cgi-bin/wifi.cgi?comand=diagnostic" target="body">
       <div class="button">Diagnòstic</div>
     </a>

@@ -116,7 +116,7 @@ comand=$(echo "$QUERY_STRING" | sed -n 's/^.*comand=\([^&]*\).*$/\1/p')
 comand=$(urldecode "$comand")
 
 case "$comand" in
-  estat|iniciar|aturar|reiniciar|diagnostic)
+  estat|iniciar|aturar|reiniciar|diagnostic|fix_apply)
     echo "<h2>Resposta del sistema</h2>"
     echo "<pre>"
     echo "$("$DIR"/"$PROJECTE"/"$DIR_SCRIPTS"/client_srv_cli wifi "$comand")"
@@ -216,48 +216,70 @@ case "$comand" in
   config_dhcp)
     echo "<h2>Configuració DHCP per WiFi</h2>"
     DHCP_CONF=$("$DIR"/"$PROJECTE"/"$DIR_SCRIPTS"/client_srv_cli wifi config_dhcp_read)
-    
+
     STATUS=$(echo "$DHCP_CONF" | awk '{print $1}')
     R_INI=$(echo "$DHCP_CONF" | awk '{print $2}')
     R_FI=$(echo "$DHCP_CONF" | awk '{print $3}')
     LEASE=$(echo "$DHCP_CONF" | awk '{print $4}')
     GW=$(echo "$DHCP_CONF" | awk '{print $5}')
     DNS=$(echo "$DHCP_CONF" | awk '{print $6}')
-    
-    if [ -z "$STATUS" ] || [ "$STATUS" = "DESACTIVAT" ]; then
-        STATUS_DIS="DESACTIVAT"
-        STATUS_VAL="0"
+
+    # Detectar si és ACTIVAT via bridge VLAN (ACTIVAT_BRIDGE:br0.X)
+    BRIDGE_VLAN=$(echo "$STATUS" | grep -oP '(?<=ACTIVAT_BRIDGE:)\S+')
+    STATUS_BASE=$(echo "$STATUS" | cut -d':' -f1)
+
+    if [ -n "$BRIDGE_VLAN" ]; then
+      # WiFi bridged: mostrar info del bridge VLAN, sense formulari de modificació directa
+      echo '<div class="form-container">'
+      echo '<p>Estat actual: <strong style="color:#4ade80;">✅ ACTIVAT (via bridge)</strong></p>'
+      echo "<p style='color:#94a3b8; font-size:13px;'>La interfície WiFi és membre del bridge <strong style='color:#38bdf8;'>$BRIDGE_VLAN</strong>. El DHCP dels clients WiFi és gestionat pel rang d'aquesta VLAN.</p>"
+      echo '<table>'
+      echo '<tr><th>Paràmetre</th><th>Valor</th></tr>'
+      echo "<tr><td>Interfície VLAN</td><td>$BRIDGE_VLAN</td></tr>"
+      echo "<tr><td>Rang DHCP</td><td>$R_INI &ndash; $R_FI</td></tr>"
+      echo "<tr><td>Temps de Lease</td><td>$LEASE</td></tr>"
+      echo "<tr><td>Gateway</td><td>$GW</td></tr>"
+      echo "<tr><td>DNS</td><td>$DNS</td></tr>"
+      echo '</table>'
+      echo "<p style='margin-top:14px; color:#94a3b8; font-size:12px;'>Per canviar el rang, usa el menú <strong>DHCP → Configurar</strong> seleccionant la VLAN <strong>$BRIDGE_VLAN</strong>.</p>"
+      echo '</div>'
     else
-        STATUS_DIS="ACTIVAT"
-        STATUS_VAL="1"
+      # WiFi no bridged (o desactivat): mostrar formulari de configuració directa
+      if [ -z "$STATUS_BASE" ] || [ "$STATUS_BASE" = "DESACTIVAT" ]; then
+          STATUS_DIS="DESACTIVAT"
+          STATUS_VAL="0"
+      else
+          STATUS_DIS="ACTIVAT"
+          STATUS_VAL="1"
+      fi
+
+      echo '<div class="form-container">'
+      echo "<p>Estat actual: <strong>$STATUS_DIS</strong></p>"
+      echo '<form action="/cgi-bin/wifi.cgi" method="GET">'
+      echo '<input type="hidden" name="comand" value="config_dhcp_save" />'
+
+      echo '<label>Activar DHCP Wifi (1 per activar, 0 per desactivar):</label>'
+      echo "<input type=\"text\" name=\"status\" value=\"$STATUS_VAL\" required />"
+
+      echo '<label>IP Inici:</label>'
+      echo "<input type=\"text\" name=\"r_ini\" value=\"$R_INI\" />"
+
+      echo '<label>IP Final:</label>'
+      echo "<input type=\"text\" name=\"r_fi\" value=\"$R_FI\" />"
+
+      echo '<label>Temps de Lease (ex: 12h):</label>'
+      echo "<input type=\"text\" name=\"lease\" value=\"$LEASE\" />"
+
+      echo '<label>Gateway (Router IP, sense màscara):</label>'
+      echo "<input type=\"text\" name=\"gw\" value=\"$GW\" placeholder=\"ex: 10.0.3.1\" />"
+
+      echo '<label>DNS Server:</label>'
+      echo "<input type=\"text\" name=\"dns\" value=\"$DNS\" />"
+
+      echo '<input type="submit" value="Guardar i reiniciar Dnsmasq">'
+      echo '</form>'
+      echo '</div>'
     fi
-    
-    echo '<div class="form-container">'
-    echo "<p>Estat actual: <strong>$STATUS_DIS</strong></p>"
-    echo '<form action="/cgi-bin/wifi.cgi" method="GET">'
-    echo '<input type="hidden" name="comand" value="config_dhcp_save" />'
-    
-    echo '<label>Activar DHCP Wifi (1 per activar, 0 per desactivar):</label>'
-    echo "<input type=\"text\" name=\"status\" value=\"$STATUS_VAL\" required />"
-    
-    echo '<label>IP Inici:</label>'
-    echo "<input type=\"text\" name=\"r_ini\" value=\"$R_INI\" />"
-    
-    echo '<label>IP Final:</label>'
-    echo "<input type=\"text\" name=\"r_fi\" value=\"$R_FI\" />"
-    
-    echo '<label>Temps de Lease (ex: 12h):</label>'
-    echo "<input type=\"text\" name=\"lease\" value=\"$LEASE\" />"
-    
-    echo '<label>Gateway (Router IP):</label>'
-    echo "<input type=\"text\" name=\"gw\" value=\"$GW\" />"
-    
-    echo '<label>DNS Server:</label>'
-    echo "<input type=\"text\" name=\"dns\" value=\"$DNS\" />"
-    
-    echo '<input type="submit" value="Guardar i reiniciar Dnsmasq">'
-    echo '</form>'
-    echo '</div>'
     ;;
     
   config_dhcp_save)

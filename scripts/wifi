@@ -75,11 +75,17 @@ fnc_config_ap_save() {
         echo "L'arxiu /etc/hostapd/hostapd.conf no existeix. Es crearà un nou."
         touch /etc/hostapd/hostapd.conf
         echo "interface=$WIFI_IFACE" > /etc/hostapd/hostapd.conf
+        echo "driver=nl80211" >> /etc/hostapd/hostapd.conf
+        echo "bridge=br0" >> /etc/hostapd/hostapd.conf
         echo "logger_syslog=-1" >> /etc/hostapd/hostapd.conf
         echo "logger_syslog_level=2" >> /etc/hostapd/hostapd.conf
         echo "logger_stdout=-1" >> /etc/hostapd/hostapd.conf
         echo "logger_stdout_level=2" >> /etc/hostapd/hostapd.conf
     fi
+
+    # Assegurar que la directiva bridge= sempre és present
+    grep -q "^bridge=" /etc/hostapd/hostapd.conf || \
+        sed -i "/^driver=/a bridge=br0" /etc/hostapd/hostapd.conf
 
     # Update or add attributes
     sed -i -E "s/^ssid=.*/ssid=$SSID/" /etc/hostapd/hostapd.conf
@@ -146,30 +152,65 @@ fnc_config_xarxa_save() {
 }
 
 fnc_diagnostic_bridges() {
-    ip -br link | grep bridge
+    echo "=== Bridges ==="
+    ip -br link show type bridge 2>/dev/null
+    echo ""
+    echo "=== Membres dels Bridges ==="
+    bridge link show 2>/dev/null
 }
 
 fnc_config_dhcp_read() {
-    if [ -n "$WIFI_IFACE" ]; then
-        CONF_FILE="/etc/dnsmasq.conf"
-        if [ ! -f "$CONF_FILE" ]; then
-            echo ""
+    if [ -z "$WIFI_IFACE" ]; then return; fi
+
+    CONF_FILE="/etc/dnsmasq.conf"
+    if [ ! -f "$CONF_FILE" ]; then echo ""; return; fi
+
+    # Primer: intentar llegir config directa sobre la interfície WiFi física
+    local line_range=$(grep -E "^interface=$WIFI_IFACE" -A 1 "$CONF_FILE" | grep "^dhcp-range")
+    if [ -n "$line_range" ]; then
+        local range_ini=$(echo "$line_range" | cut -d'=' -f2 | cut -d',' -f1)
+        local range_fi=$(echo "$line_range" | cut -d',' -f2)
+        local lease=$(echo "$line_range" | cut -d',' -f4 | cut -d' ' -f1)
+        local gw=$(grep "^dhcp-option=interface:$WIFI_IFACE,option:router" "$CONF_FILE" | cut -d',' -f3)
+        local dns=$(grep "^dhcp-option=interface:$WIFI_IFACE,option:dns-server" "$CONF_FILE" | cut -d',' -f3)
+        echo "ACTIVAT $range_ini $range_fi $lease $gw $dns"
+        return
+    fi
+
+    # Segon: si la WiFi és membre d'un bridge, buscar la VLAN del bridge amb DHCP
+    local master=$(ip link show dev "$WIFI_IFACE" 2>/dev/null | awk '/master/{for(i=1;i<=NF;i++) if($i=="master") print $(i+1)}')
+    if [ -z "$master" ]; then
+        echo "DESACTIVAT"
+        return
+    fi
+
+    # Trobar primera subinterfície VLAN del bridge configurada a dnsmasq (ex: br0.3)
+    local bridge_vlan=""
+    for vlan_iface in $(grep "^interface=${master}\." "$CONF_FILE" | cut -d'=' -f2); do
+        bridge_vlan="$vlan_iface"
+        break
+    done
+    # Si no hi ha br0.X, provar amb el propi bridge (br0)
+    if [ -z "$bridge_vlan" ]; then
+        grep -q "^interface=${master}$" "$CONF_FILE" && bridge_vlan="$master"
+    fi
+
+    if [ -n "$bridge_vlan" ]; then
+        local line_range2=$(grep -E "^interface=$bridge_vlan" -A 1 "$CONF_FILE" | grep "^dhcp-range")
+        if [ -n "$line_range2" ]; then
+            local range_ini=$(echo "$line_range2" | cut -d'=' -f2 | cut -d',' -f1)
+            local range_fi=$(echo "$line_range2" | cut -d',' -f2)
+            local lease=$(echo "$line_range2" | cut -d',' -f4 | cut -d' ' -f1)
+            local gw=$(grep "^dhcp-option=interface:$bridge_vlan,option:router" "$CONF_FILE" | cut -d',' -f3)
+            local dns=$(grep "^dhcp-option=interface:$bridge_vlan,option:dns-server" "$CONF_FILE" | cut -d',' -f3)
+            echo "ACTIVAT_BRIDGE:$bridge_vlan $range_ini $range_fi $lease $gw $dns"
             return
         fi
-
-        local line_range=$(grep -E "^interface=$WIFI_IFACE" -A 1 "$CONF_FILE" | grep "^dhcp-range")
-        if [ -n "$line_range" ]; then
-            local range_ini=$(echo "$line_range" | cut -d'=' -f2 | cut -d',' -f1)
-            local range_fi=$(echo "$line_range" | cut -d',' -f2)
-            local lease=$(echo "$line_range" | cut -d',' -f4 | cut -d' ' -f1)
-            local gw=$(grep "^dhcp-option=interface:$WIFI_IFACE,option:router" "$CONF_FILE" | cut -d',' -f3)
-            local dns=$(grep "^dhcp-option=interface:$WIFI_IFACE,option:dns-server" "$CONF_FILE" | cut -d',' -f3)
-            echo "ACTIVAT $range_ini $range_fi $lease $gw $dns"
-        else
-            echo "DESACTIVAT"
-        fi
     fi
+
+    echo "DESACTIVAT"
 }
+
 
 fnc_config_dhcp_save() {
     STATUS=$1
@@ -179,34 +220,53 @@ fnc_config_dhcp_save() {
     GW=$5
     DNS=$6
 
+    # Validar que GW no porta màscara CIDR (ex: 10.0.3.1/24 és invàlid)
+    if [[ "$GW" == *"/"* ]]; then
+        echo "ERROR: La IP del gateway no pot tenir màscara CIDR (has posat '$GW'). Usa només la IP, ex: 10.0.3.1"
+        return 1
+    fi
+
+    # Determinar interfície de bridge associada a la WiFi per a DHCP
+    # Si la WiFi és membre d'un bridge, el DHCP per a clients WiFi es gestiona via el bridge VLAN
+    # La configuració directa sobre la interfície física no funciona amb bind-interfaces
+    BRIDGE_IFACE=""
+    if [ -n "$WIFI_IFACE" ]; then
+        BRIDGE_IFACE=$(ip link show dev "$WIFI_IFACE" 2>/dev/null | awk '/master/{for(i=1;i<=NF;i++) if($i=="master") print $(i+1)}')
+    fi
+
     CONF_FILE="/etc/dnsmasq.conf"
     BACKUP_FILE="/etc/dnsmasq.conf.bak"
     touch "$CONF_FILE"
     cp "$CONF_FILE" "$BACKUP_FILE"
 
+    # Sempre netejar entrades antigues de la interfície WiFi física (que no funcionen amb bridge)
+    sed -i "/^interface=$WIFI_IFACE/d" "$CONF_FILE"
+    sed -i "/^dhcp-range=.*#$WIFI_IFACE/d" "$CONF_FILE"
+    sed -i "/^dhcp-option=interface:$WIFI_IFACE/d" "$CONF_FILE"
+
     if [ "$STATUS" = "1" ]; then
-        sed -i "/^interface=$WIFI_IFACE/d" "$CONF_FILE"
-        sed -i "\/^dhcp-range=.*#$WIFI_IFACE/d" "$CONF_FILE"
-        sed -i "/^dhcp-option=interface:$WIFI_IFACE/d" "$CONF_FILE"
-
-        echo "interface=$WIFI_IFACE" >> "$CONF_FILE"
-        echo "dhcp-range=$R_INI,$R_FI,255.255.255.0,$LEASE #$WIFI_IFACE" >> "$CONF_FILE"
-        echo "dhcp-option=interface:$WIFI_IFACE,option:router,$GW" >> "$CONF_FILE"
-        echo "dhcp-option=interface:$WIFI_IFACE,option:dns-server,$DNS" >> "$CONF_FILE"
-        echo "Servidor DHCP activat per la interfície $WIFI_IFACE."
+        if dnsmasq --test > /dev/null 2>&1; then
+            systemctl restart dnsmasq
+            echo "Servidor DHCP activat per la interfície $WIFI_IFACE."
+            if [ -n "$BRIDGE_IFACE" ]; then
+                echo "NOTA: La WiFi és membre del bridge '$BRIDGE_IFACE'."
+                echo "      El DHCP dels clients WiFi es gestiona pel rang DHCP del bridge VLAN."
+                echo "      Configura el DHCP a la secció del bridge '$BRIDGE_IFACE' des del menú DHCP principal."
+            fi
+            echo "dnsmasq reiniciat correctament."
+        else
+            echo "ERROR: Sintaxi de dnsmasq incorrecta. Restaurat backup."
+            cp "$BACKUP_FILE" "$CONF_FILE"
+        fi
     else
-        sed -i "/^interface=$WIFI_IFACE/d" "$CONF_FILE"
-        sed -i "\/^dhcp-range=.*#$WIFI_IFACE/d" "$CONF_FILE"
-        sed -i "/^dhcp-option=interface:$WIFI_IFACE/d" "$CONF_FILE"
         echo "Servidor DHCP desactivat per la interfície $WIFI_IFACE."
-    fi
-
-    if dnsmasq --test > /dev/null 2>&1; then
-        systemctl restart dnsmasq
-        echo "dnsmasq reiniciat correctament."
-    else
-        echo "ERROR: Sintaxi de dnsmasq incorrecta. Restaurat backup."
-        cp "$BACKUP_FILE" "$CONF_FILE"
+        if dnsmasq --test > /dev/null 2>&1; then
+            systemctl restart dnsmasq
+            echo "dnsmasq reiniciat correctament."
+        else
+            echo "ERROR: Sintaxi de dnsmasq incorrecta. Restaurat backup."
+            cp "$BACKUP_FILE" "$CONF_FILE"
+        fi
     fi
 }
 
@@ -242,6 +302,77 @@ fi
 COMMAND=$1
 shift
 
+fnc_fix_apply() {
+    echo "=== Aplicant correccions de configuració WiFi/DHCP ==="
+    echo ""
+    HOSTAPD_CONF="/etc/hostapd/hostapd.conf"
+    DNSMASQ_CONF="/etc/dnsmasq.conf"
+
+    # --- FIX 1: Afegir bridge=br0 a hostapd.conf si no hi és ---
+    if [ -f "$HOSTAPD_CONF" ]; then
+        if grep -q "^bridge=" "$HOSTAPD_CONF"; then
+            echo "[OK] bridge= ja present a hostapd.conf: $(grep '^bridge=' $HOSTAPD_CONF)"
+        else
+            cp "$HOSTAPD_CONF" "${HOSTAPD_CONF}.bak"
+            if grep -q "^driver=" "$HOSTAPD_CONF"; then
+                sed -i "/^driver=/a bridge=br0" "$HOSTAPD_CONF"
+            else
+                sed -i "/^interface=/a bridge=br0" "$HOSTAPD_CONF"
+            fi
+            echo "[FIX] bridge=br0 afegit a hostapd.conf"
+        fi
+    else
+        echo "[WARN] No es troba $HOSTAPD_CONF"
+    fi
+
+    # --- FIX 2: Eliminar secció WiFi invàlida de dnsmasq.conf ---
+    if [ -f "$DNSMASQ_CONF" ] && [ -n "$WIFI_IFACE" ]; then
+        cp "$DNSMASQ_CONF" "${DNSMASQ_CONF}.bak"
+        sed -i "/^interface=$WIFI_IFACE/d" "$DNSMASQ_CONF"
+        sed -i "/^dhcp-range=.*#$WIFI_IFACE/d" "$DNSMASQ_CONF"
+        sed -i "/^dhcp-option=interface:$WIFI_IFACE/d" "$DNSMASQ_CONF"
+        echo "[FIX] Eliminades entrades WiFi ($WIFI_IFACE) incorrectes de dnsmasq.conf"
+    fi
+
+    # --- Verificació sintaxi dnsmasq ---
+    echo ""
+    if dnsmasq --test > /dev/null 2>&1; then
+        echo "[OK] Sintaxi dnsmasq correcta"
+        systemctl restart dnsmasq && echo "[OK] dnsmasq reiniciat"
+    else
+        echo "[ERROR] Sintaxi dnsmasq incorrecta:"
+        dnsmasq --test 2>&1
+        echo "[ROLLBACK] Restaurant backup de dnsmasq.conf"
+        cp "${DNSMASQ_CONF}.bak" "$DNSMASQ_CONF"
+    fi
+
+    # --- Verificació hostapd ---
+    # Nota: hostapd -t inicia el driver nl80211 i falla si ja hi ha una instància activa.
+    # Usem verificació lleugera comprovant les directives clau.
+    echo ""
+    MISSING_KEYS=""
+    for key in interface driver bridge ssid hw_mode; do
+        grep -q "^${key}=" "$HOSTAPD_CONF" || MISSING_KEYS="$MISSING_KEYS $key"
+    done
+    if [ -z "$MISSING_KEYS" ]; then
+        echo "[OK] hostapd.conf conté totes les directives necessàries"
+        systemctl restart hostapd && echo "[OK] hostapd reiniciat"
+    else
+        echo "[WARN] hostapd.conf li falten:$MISSING_KEYS"
+    fi
+
+    echo ""
+    echo "=== Estat final ==="
+    echo "hostapd: $(systemctl is-active hostapd)"
+    echo "dnsmasq: $(systemctl is-active dnsmasq)"
+    echo ""
+    echo "Bridge WiFi:"
+    bridge link show 2>/dev/null | grep -E "$WIFI_IFACE|master" || echo "  (sense resultats)"
+    echo ""
+    echo "Port 67 UDP (DHCP):"
+    ss -ulnp 2>/dev/null | grep ':67 ' || echo "  dnsmasq NO escolta al port 67!"
+}
+
 case "$COMMAND" in
     iniciar) fnc_iniciar ;;
     aturar) fnc_aturar ;;
@@ -255,5 +386,6 @@ case "$COMMAND" in
     config_dhcp_read) fnc_config_dhcp_read ;;
     config_dhcp_save) fnc_config_dhcp_save "$1" "$2" "$3" "$4" "$5" "$6" ;;
     diagnostic) fnc_diagnostic ;;
+    fix_apply) fnc_fix_apply ;;
     *) echo "Comanda desconeguda: $COMMAND" ;;
 esac
