@@ -150,6 +150,61 @@ fnc_ebtables_apply()
 	fi
 }
 
+fnc_iptables_apply()
+{
+    # Llegir interfície WAN des de la configuració
+    local WAN_IF
+    WAN_IF=$(grep '^IFW_IFWAN=' "$DIR/$PROJECTE/$DIR_CONF/$CONF_IFWAN" 2>/dev/null | cut -d'=' -f2)
+    if [ -z "$WAN_IF" ]; then
+        echo "[iptables] WARN: no s'ha pogut determinar IFW_IFWAN, NAT no configurat"
+        WAN_IF="?"
+    fi
+
+    # Netejar regles anteriors
+    iptables -F FORWARD 2>/dev/null
+    iptables -t nat -F POSTROUTING 2>/dev/null
+
+    # Política per defecte FORWARD: DROP (tot bloquejat si no hi ha regla)
+    iptables -P FORWARD DROP 2>/dev/null
+
+    # --- Permisos base ---
+    # Connexions establertes o relacionades (respostes): ACCEPTAR sempre
+    iptables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+    if [ "$WAN_IF" != "?" ]; then
+        # VLANs internes → WAN: PERMÈS (sortida a Internet)
+        iptables -A FORWARD -i br0.1 -o "$WAN_IF" -j ACCEPT   # Admin → WAN
+        iptables -A FORWARD -i br0.2 -o "$WAN_IF" -j ACCEPT   # DMZ   → WAN
+        iptables -A FORWARD -i br0.3 -o "$WAN_IF" -j ACCEPT   # Clients/WiFi → WAN
+
+        # WAN → DMZ: PERMÈS (accessos externs a servidors DMZ)
+        iptables -A FORWARD -i "$WAN_IF" -o br0.2 -j ACCEPT
+
+        # WAN → Admin i Clients: BLOQUEJAT (no volem accés extern a xarxa interna)
+        iptables -A FORWARD -i "$WAN_IF" -o br0.1 -j DROP
+        iptables -A FORWARD -i "$WAN_IF" -o br0.3 -j DROP
+
+        # --- NAT: Masquerade per a VLANs → WAN ---
+        iptables -t nat -A POSTROUTING -s 10.0.0.0/8 -o "$WAN_IF" -j MASQUERADE
+    fi
+
+    # --- Segmentació inter-VLAN ---
+    # VLAN 3 (Clients/WiFi) NO pot accedir a VLAN 1 (Admin)
+    iptables -A FORWARD -i br0.3 -o br0.1 -j DROP
+    iptables -A FORWARD -i br0.1 -o br0.3 -j DROP
+
+    # VLAN 3 (Clients/WiFi) NO pot accedir a VLAN 2 (DMZ)
+    iptables -A FORWARD -i br0.3 -o br0.2 -j DROP
+    iptables -A FORWARD -i br0.2 -o br0.3 -j DROP
+
+    # VLAN 1 (Admin) pot accedir a VLAN 2 (DMZ): PERMÈS (administració de servidors)
+    iptables -A FORWARD -i br0.1 -o br0.2 -j ACCEPT
+    iptables -A FORWARD -i br0.2 -o br0.1 -j ACCEPT
+
+    echo "[iptables] Regles de segmentació aplicades (WAN: ${WAN_IF})"
+    iptables -L FORWARD --line-numbers -n 2>/dev/null | head -20
+}
+
 fnc_iniciar()
 {
 	echo "Iniciar"
@@ -191,6 +246,9 @@ fnc_iniciar()
 
     # Aplicar regles ebtables
     fnc_ebtables_apply
+
+    # Aplicar segmentació iptables inter-VLAN
+    fnc_iptables_apply
 }
 
 fnc_aturar()
@@ -199,6 +257,10 @@ fnc_aturar()
 	ip l d dev br0
     # Netejar regles ebtables
     ebtables -t filter -F FORWARD
+    # Netejar regles iptables FORWARD i NAT
+    iptables -F FORWARD 2>/dev/null
+    iptables -P FORWARD ACCEPT 2>/dev/null
+    iptables -t nat -F POSTROUTING 2>/dev/null
 }
 
 
@@ -370,6 +432,9 @@ case "$OPCIO_1" in
     ;;
   estat) 
     fnc_estat $@
+    ;;
+  iptables-apply)
+    fnc_iptables_apply
     ;;
   *)
     echo "$MSG"

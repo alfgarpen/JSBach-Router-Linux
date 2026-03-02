@@ -14,6 +14,7 @@ fnc_iniciar() {
     echo "Iniciant hostapd..."
     systemctl start hostapd
     echo "hostapd iniciat"
+    fnc_apply_vlan3
 }
 
 fnc_aturar() {
@@ -26,6 +27,31 @@ fnc_reiniciar() {
     echo "Reiniciant hostapd..."
     systemctl restart hostapd
     echo "hostapd reiniciat"
+    fnc_apply_vlan3
+}
+
+# Assegurar que la interfície WiFi estigui a la VLAN 3 (Clients) com a port untagged
+# Hostapd afegeix la iface al bridge però no n'assigna la VLAN
+fnc_apply_vlan3() {
+    if [ -z "$WIFI_IFACE" ]; then return; fi
+    local MASTER
+    MASTER=$(ip link show dev "$WIFI_IFACE" 2>/dev/null | awk '/master/{for(i=1;i<=NF;i++) if($i=="master") print $(i+1)}')
+    if [ -z "$MASTER" ]; then
+        echo "[VLAN] WiFi no està al bridge, esperant 2s..."
+        sleep 2
+        MASTER=$(ip link show dev "$WIFI_IFACE" 2>/dev/null | awk '/master/{for(i=1;i<=NF;i++) if($i=="master") print $(i+1)}')
+    fi
+    if [ -n "$MASTER" ]; then
+        # Eliminar VLAN 1 per defecte (Admin) del port WiFi
+        bridge vlan del dev "$WIFI_IFACE" vid 1 pvid untagged 2>/dev/null && echo "[VLAN] VLAN 1 eliminada de $WIFI_IFACE"
+        # Afegir VLAN 3 com a PVID untagged (clients reben trames sense etiqueta 802.1Q)
+        bridge vlan add dev "$WIFI_IFACE" vid 3 pvid untagged 2>/dev/null && echo "[VLAN] VLAN 3 assignada a $WIFI_IFACE com a PVID untagged"
+        bridge vlan add dev "$MASTER" vid 3 self 2>/dev/null
+        echo "[VLAN] Configuració actual de $WIFI_IFACE:"
+        bridge vlan show dev "$WIFI_IFACE" 2>/dev/null
+    else
+        echo "[VLAN] No s'ha pogut determinar el bridge de $WIFI_IFACE"
+    fi
 }
 
 fnc_estat() {

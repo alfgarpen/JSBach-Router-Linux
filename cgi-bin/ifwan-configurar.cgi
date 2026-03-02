@@ -7,15 +7,25 @@ source /usr/local/JSBach/conf/variables.conf
 echo "Content-type: text/html"
 echo ""
 
-# --- Funció per obtenir interfícies Ethernet (sense lo ni wifi) ---
+# --- Funció per obtenir interfícies Ethernet candidates a WAN ---
+# Exclou: loopback, subinterfícies VLAN (br0.X@br0), bridges, WiFi
 Interfaces_Ethernet() {
-    for iface in $(ip -o link show | awk -F': ' '{print $2}'); do
-        if [[ "$iface" != "lo" ]]; then
-            if ! iw dev 2>/dev/null | grep -qw "$iface"; then
-                echo "$iface"
-            fi
-        fi
-    done
+    ip -o link show | awk -F': ' '{print $2}' | while read -r raw; do
+        # Subinterfícies VLAN tenen format nom@pare (ex: br0.1@br0) — excloure
+        [[ "$raw" == *@* ]] && continue
+        iface="$raw"
+        # Loopback
+        [[ "$iface" == "lo" ]] && continue
+        # Bridges i subinterfícies de bridge per nom (br0, br0.*, br-*)
+        [[ "$iface" == br0 ]] && continue
+        [[ "$iface" == br0.* ]] && continue
+        [[ "$iface" == br-* ]] && continue
+        # Interfícies de tipus bridge detectades per ip -d link
+        ip -d link show dev "$iface" 2>/dev/null | grep -qw 'bridge' && continue
+        # Interfícies WiFi (hostapd AP)
+        iw dev 2>/dev/null | grep -qw "$iface" && continue
+        echo "$iface"
+    done | sort -u
 }
 
 CONFIGURACIO=$("$DIR"/"$PROJECTE"/"$DIR_SCRIPTS"/client_srv_cli ifwan configurar mostrar)
