@@ -15,7 +15,7 @@ fnc_iniciar()
 	for linia in $(grep -v '#' "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF"); do
 	    nom=$(echo "$linia"|cut -d';' -f1)
 	    ip=$(echo "$linia"|cut -d';' -f3)
-	    iptables -N $nom
+	    iptables -N $nom 2>/dev/null || iptables -F $nom
 	    iptables -A FORWARD -s $ip -j $nom	    
 	done
 	

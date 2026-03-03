@@ -156,6 +156,10 @@ function wifi(){
 window.top.frames['menu'].location.href='/cgi-bin/wifi-menu.cgi';
 window.top.frames['body'].location.href='/cgi-bin/wifi.cgi?comand=estat&';
 }
+function portal(){
+window.top.frames['menu'].location.href='/cgi-bin/portal-menu.cgi';
+window.top.frames['body'].location.href='/cgi-bin/portal-estat.cgi';
+}
 </script>
 
 <div class="nav-row">
@@ -168,6 +172,7 @@ window.top.frames['body'].location.href='/cgi-bin/wifi.cgi?comand=estat&';
   <button onclick="switchs()">SWITCH</button>
   <button onclick="dhcp()">DHCP</button>
   <button onclick="wifi()">WIFI</button>
+  <button onclick="portal()">PORTAL CAUTIU</button>
   <button class="btn-logout" onclick="window.top.location.href='/cgi-bin/logout.cgi'">🔒 Tancar sessió</button>
 </div>
 

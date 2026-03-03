@@ -1,0 +1,192 @@
+#!/bin/bash
+
+source /usr/local/JSBach/conf/variables.conf
+source /usr/local/JSBach/conf/portal.conf
+
+SESSION_DIR=/tmp/portal_sessions
+mkdir -p "$SESSION_DIR"
+chmod 777 "$SESSION_DIR"
+
+# Detectar nombre de interfaz de VLAN
+get_vlan_if() {
+    local vid=$1
+    if ip addr show "br0.$vid" >/dev/null 2>&1; then
+        echo "br0.$vid"
+    elif ip addr show "vlan$vid" >/dev/null 2>&1; then
+        echo "vlan$vid"
+    else
+        # Fallback experimental o error
+        echo "br0.$vid"
+    fi
+}
+
+fnc_iniciar() {
+    if [ "$ENABLED" -ne 1 ] && [ "$ENABLED" != "1" ]; then
+        echo "Portal deshabilitado en la configuración (ENABLED=$ENABLED)."
+        return
+    fi
+
+    if [ -z "$VLAN_VID" ]; then
+        echo "Error: VLAN_VID no definida."
+        return
+    fi
+
+    local IF_VLAN=$(get_vlan_if "$VLAN_VID")
+
+    # Obtener nombre de la VLAN y la IP de la puerta de enlace (campo 4 en bridge.conf)
+    linia=$(grep ";$VLAN_VID;" "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF")
+    VLAN_NAME=$(echo "$linia" | cut -d';' -f1)
+    # El campo 3 es la red, el campo 4 es la IP de la interfaz (pasarela)
+    VLAN_IP=$(echo "$linia" | cut -d';' -f4 | cut -d'/' -f1)
+
+    if [ -z "$VLAN_NAME" ] || [ -z "$VLAN_IP" ]; then
+        echo "Error: No se encontró la VLAN $VLAN_VID o su IP de pasarela."
+        return
+    fi
+
+    echo "Iniciando Portal Cautivo para $VLAN_NAME ($VLAN_IP) en interfaz $IF_VLAN"
+
+    # Crear chains si no existen
+    iptables -N PORTAL_AUTH 2>/dev/null
+    iptables -t nat -N PORTAL_REDIRECT 2>/dev/null
+
+    # Limpiar chains
+    iptables -F PORTAL_AUTH
+    iptables -t nat -F PORTAL_REDIRECT
+
+    # Redirección HTTP y HTTPS hacia el portal
+    SERVER_IP="$VLAN_IP"
+    
+    # Capturar tráfico puerto 80 y 443
+    iptables -t nat -A PREROUTING -i "$IF_VLAN" -p tcp --dport 80 -j PORTAL_REDIRECT
+    iptables -t nat -A PREROUTING -i "$IF_VLAN" -p tcp --dport 443 -j PORTAL_REDIRECT
+    
+    # Excluir el propio servidor y Walled Garden
+    iptables -t nat -A PORTAL_REDIRECT -d "$SERVER_IP" -j RETURN
+    
+    # Walled Garden
+    for item in $(echo "$WALLED_GARDEN" | tr ',' ' '); do
+        iptables -t nat -A PORTAL_REDIRECT -d "$item" -j RETURN
+    done
+
+    # Redirigir el resto al servidor local (Puerto 80 para el portal)
+    iptables -t nat -A PORTAL_REDIRECT -p tcp --dport 80 -j DNAT --to-destination "$SERVER_IP:80"
+    iptables -t nat -A PORTAL_REDIRECT -p tcp --dport 443 -j DNAT --to-destination "$SERVER_IP:80"
+
+    # En el FORWARD, bloquear todo lo que no esté en PORTAL_AUTH
+    # Primero quitamos la regla anterior para evitar borrados fallidos o duplicados
+    iptables -D FORWARD -i "$IF_VLAN" -j PORTAL_AUTH 2>/dev/null
+    iptables -I FORWARD -i "$IF_VLAN" -j PORTAL_AUTH
+    iptables -A PORTAL_AUTH -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # Permitir DNS y DHCP siempre
+    iptables -A PORTAL_AUTH -p udp --dport 53 -j ACCEPT
+    iptables -A PORTAL_AUTH -p udp --dport 67:68 -j ACCEPT
+    
+    # El resto se dropea (las sesiones autenticadas se insertarán al principio de esta chain)
+    iptables -A PORTAL_AUTH -j DROP
+}
+
+fnc_aturar() {
+    echo "Deteniendo Portal Cautivo para VLAN $VLAN_VID"
+    local IF_VLAN=$(get_vlan_if "$VLAN_VID")
+    
+    # Eliminar reglas de redirección nat
+    iptables -t nat -D PREROUTING -i "$IF_VLAN" -p tcp --dport 80 -j PORTAL_REDIRECT 2>/dev/null
+    iptables -t nat -D PREROUTING -i "$IF_VLAN" -p tcp --dport 443 -j PORTAL_REDIRECT 2>/dev/null
+    iptables -t nat -F PORTAL_REDIRECT 2>/dev/null
+    iptables -t nat -X PORTAL_REDIRECT 2>/dev/null
+
+    # Eliminar cualquier cadena PORTAL_REDIRECT errónea en la tabla filter
+    iptables -F PORTAL_REDIRECT 2>/dev/null
+    iptables -X PORTAL_REDIRECT 2>/dev/null
+
+    # Eliminar saltos a PORTAL_AUTH
+    iptables -D FORWARD -i "$IF_VLAN" -j PORTAL_AUTH 2>/dev/null
+    
+    # Limpiar y eliminar chain PORTAL_AUTH
+    iptables -F PORTAL_AUTH 2>/dev/null
+    iptables -X PORTAL_AUTH 2>/dev/null
+}
+
+fnc_estat() {
+    echo "=== Estado del Portal Cautivo ==="
+    echo "ENABLED: $ENABLED"
+    echo "VLAN_VID: $VLAN_VID"
+    local IF_VLAN=$(get_vlan_if "$VLAN_VID")
+    echo "Interfaz detectada: $IF_VLAN"
+    echo
+    echo "--- Reglas NAT (Redirección) ---"
+    iptables -t nat -L PORTAL_REDIRECT -n 2>/dev/null || echo "Chain PORTAL_REDIRECT no existe"
+    echo
+    echo "--- Reglas FILTER (Autorización) ---"
+    iptables -L PORTAL_AUTH -n 2>/dev/null || echo "Chain PORTAL_AUTH no existe"
+    echo
+    echo "--- Sesiones activas ---"
+    ls -l "$SESSION_DIR" 2>/dev/null | grep "^-" | wc -l
+}
+
+fnc_auth_user() {
+    local ip="$1"
+    local mac="$2"
+    local user="$3"
+
+    if [ -z "$ip" ] || [ -z "$mac" ]; then
+        echo "Error: IP y MAC requeridas."
+        return
+    fi
+
+    echo "Autenticando usuario $user ($ip, $mac)"
+    
+    # Insertar regla al principio de PORTAL_AUTH (antes del DROP final)
+    iptables -I PORTAL_AUTH 1 -s "$ip" -m mac --mac-source "$mac" -j ACCEPT
+
+    # Crear archivo de sesión
+    local sid=$(echo -n "$ip$mac$user$(date +%s)" | sha256sum | awk '{print $1}')
+    echo "USER=\"$user\"" > "$SESSION_DIR/$sid"
+    echo "IP=\"$ip\"" >> "$SESSION_DIR/$sid"
+    echo "MAC=\"$mac\"" >> "$SESSION_DIR/$sid"
+    echo "START=\"$(date +%s)\"" >> "$SESSION_DIR/$sid"
+    echo "LAST=\"$(date +%s)\"" >> "$SESSION_DIR/$sid"
+    
+    echo "$sid"
+}
+
+fnc_deauth_user() {
+    local ip="$1"
+    local mac="$2"
+
+    iptables -D PORTAL_AUTH -s "$ip" -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
+    
+    # Eliminar archivo de sesión
+    for f in "$SESSION_DIR"/*; do
+        [ -f "$f" ] || continue
+        if grep -q "IP=\"$ip\"" "$f" && grep -q "MAC=\"$mac\"" "$f"; then
+            rm -f "$f"
+        fi
+    done
+}
+
+fnc_cleanup() {
+    local now=$(date +%s)
+    for session in "$SESSION_DIR"/*; do
+        [ -e "$session" ] || continue
+        source "$session"
+        local age=$((now - LAST))
+        local total_age=$((now - START))
+
+        if [ "$age" -gt "$IDLE_TIMEOUT" ] || [ "$total_age" -gt "$SESSION_TIMEOUT" ]; then
+            fnc_deauth_user "$IP" "$MAC"
+        fi
+    done
+}
+
+case "$1" in
+    iniciar) fnc_iniciar ;;
+    aturar) fnc_aturar ;;
+    estat) fnc_estat ;;
+    auth) fnc_auth_user "$2" "$3" "$4" ;;
+    deauth) fnc_deauth_user "$2" "$3" ;;
+    cleanup) fnc_cleanup ;;
+    *) echo "Uso: $0 {iniciar|aturar|estat|auth|deauth|cleanup}" ;;
+esac
