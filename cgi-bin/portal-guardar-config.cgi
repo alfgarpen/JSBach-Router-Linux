@@ -31,27 +31,5 @@ echo "Content-type: text/html"
 echo "Location: portal-config.cgi?msg=saved"
 echo ""
 
-# Guardar en portal.conf (reconstructor simple)
-cat > "$CONF_FILE" << EOF
-# Portal Cautivo Configuration
-ENABLED="$ENABLED"
-VLAN_VID="$VLAN_VID"
-LOGIN_URL="http://$VLAN_GATEWAY/cgi-bin/portal-login.cgi"
-SESSION_TIMEOUT="$SESSION_TIMEOUT"
-IDLE_TIMEOUT="$IDLE_TIMEOUT"
-WALLED_GARDEN="$WALLED_GARDEN"
-LOGO_URL="/img/logo.png"
-WELCOME_TEXT="$WELCOME_TEXT"
-PRIMARY_COLOR="$PRIMARY_COLOR"
-TERMS_OF_USE="Al acceder a esta red, usted acepta nuestros términos y condiciones."
-FAILED_ATTEMPTS_LIMIT="5"
-LOCKOUT_TIME="300"
-EOF
-
-# Aplicar cambios si está habilitado
-if [ "$ENABLED" -eq 1 ]; then
-    sudo $SCRIPT_PORTAL aturar > /dev/null 2>&1
-    sudo $SCRIPT_PORTAL iniciar > /dev/null 2>&1
-else
-    sudo $SCRIPT_PORTAL aturar > /dev/null 2>&1
-fi
+# Guardar y aplicar mediante el wrapper privilegiado
+/usr/local/JSBach/scripts/client_srv_cli portal configurar "$ENABLED" "$VLAN_VID" "$SESSION_TIMEOUT" "$IDLE_TIMEOUT" "$WALLED_GARDEN" "$WELCOME_TEXT" "$PRIMARY_COLOR"

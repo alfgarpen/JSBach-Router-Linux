@@ -5,7 +5,7 @@ source /usr/local/JSBach/conf/variables.conf
 
 while read -r ordre
 do
-	if [[ -n $ordre ]] then
+	if [[ -n $ordre ]]; then
 		
 		Comando=$(echo "$ordre" | awk '{print $1}') 
 		Arguments="${ordre#*$Comando }"
@@ -32,6 +32,12 @@ do
 			"wifi")
 			    eval "$DIR/$PROJECTE/$DIR_SCRIPTS/wifi $Arguments"
 			    ;;			
+			"dhcp")
+			    eval "$DIR/$PROJECTE/$DIR_SCRIPTS/dhcp $Arguments"
+			    ;;
+			"portal")
+			    eval "$DIR/$PROJECTE/$DIR_SCRIPTS/portal $Arguments"
+			    ;;
 			*) 
 			    echo "CLI Error en l'argument $Comando $Arguments"
 			    ;;

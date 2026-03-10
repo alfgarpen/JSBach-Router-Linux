@@ -116,11 +116,15 @@ fnc_estat() {
     local IF_VLAN=$(get_vlan_if "$VLAN_VID")
     echo "Interfaz detectada: $IF_VLAN"
     echo
+    echo "--- Saltos (Jumps) ---"
+    iptables -t nat -S PREROUTING | grep PORTAL_REDIRECT || echo "PREROUTING -> PORTAL_REDIRECT: FALTA"
+    iptables -S FORWARD | grep PORTAL_AUTH || echo "FORWARD -> PORTAL_AUTH: FALTA"
+    echo
     echo "--- Reglas NAT (Redirección) ---"
-    iptables -t nat -L PORTAL_REDIRECT -n 2>/dev/null || echo "Chain PORTAL_REDIRECT no existe"
+    iptables -t nat -L PORTAL_REDIRECT -n -v 2>/dev/null || echo "Chain PORTAL_REDIRECT no existe"
     echo
     echo "--- Reglas FILTER (Autorización) ---"
-    iptables -L PORTAL_AUTH -n 2>/dev/null || echo "Chain PORTAL_AUTH no existe"
+    iptables -L PORTAL_AUTH -n -v 2>/dev/null || echo "Chain PORTAL_AUTH no existe"
     echo
     echo "--- Sesiones activas ---"
     ls -l "$SESSION_DIR" 2>/dev/null | grep "^-" | wc -l
@@ -136,19 +140,9 @@ fnc_auth_user() {
         return
     fi
 
-    echo "Autenticando usuario $user ($ip, $mac)"
-    
-    # Insertar regla al principio de PORTAL_AUTH (antes del DROP final)
-    iptables -I PORTAL_AUTH 1 -s "$ip" -m mac --mac-source "$mac" -j ACCEPT
+    # Log authentication
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [AUTH] User: $user, IP: $ip, MAC: $mac" >> /usr/local/JSBach/logs/portal.log
 
-    # Crear archivo de sesión
-    local sid=$(echo -n "$ip$mac$user$(date +%s)" | sha256sum | awk '{print $1}')
-    echo "USER=\"$user\"" > "$SESSION_DIR/$sid"
-    echo "IP=\"$ip\"" >> "$SESSION_DIR/$sid"
-    echo "MAC=\"$mac\"" >> "$SESSION_DIR/$sid"
-    echo "START=\"$(date +%s)\"" >> "$SESSION_DIR/$sid"
-    echo "LAST=\"$(date +%s)\"" >> "$SESSION_DIR/$sid"
-    
     echo "$sid"
 }
 
@@ -162,7 +156,10 @@ fnc_deauth_user() {
     for f in "$SESSION_DIR"/*; do
         [ -f "$f" ] || continue
         if grep -q "IP=\"$ip\"" "$f" && grep -q "MAC=\"$mac\"" "$f"; then
+            user_found=$(grep "USER=" "$f" | cut -d'"' -f2)
             rm -f "$f"
+            # Log deauth
+            echo "$(date '+%Y-%m-%d %H:%M:%S') [DEAUTH] User: $user_found, IP: $ip, MAC: $mac" >> /usr/local/JSBach/logs/portal.log
         fi
     done
 }
@@ -181,6 +178,52 @@ fnc_cleanup() {
     done
 }
 
+fnc_configurar() {
+    local enabled="$1"
+    local vlan_vid="$2"
+    local session_timeout="$3"
+    local idle_timeout="$4"
+    local walled_garden="$5"
+    local welcome_text="$6"
+    local primary_color="$7"
+
+    # Obtener IP de la pasarela para esta VLAN
+    local gateway=$(grep ";$vlan_vid;" "/usr/local/JSBach/conf/bridge.conf" | cut -d';' -f4 | cut -d'/' -f1)
+    [ -z "$gateway" ] && gateway="10.0.3.1"
+
+    local login_url="http://$gateway/cgi-bin/portal-login.cgi"
+
+    # Guardar en portal.conf
+    cat > "/usr/local/JSBach/conf/portal.conf" << EOF
+# Portal Cautivo Configuration
+ENABLED="$enabled"
+VLAN_VID="$vlan_vid"
+LOGIN_URL="$login_url"
+SESSION_TIMEOUT="$session_timeout"
+IDLE_TIMEOUT="$idle_timeout"
+WALLED_GARDEN="$walled_garden"
+LOGO_URL="/img/logo.png"
+WELCOME_TEXT="$welcome_text"
+PRIMARY_COLOR="$primary_color"
+TERMS_OF_USE="Al acceder a esta red, usted acepta nuestros términos y condiciones."
+FAILED_ATTEMPTS_LIMIT="5"
+LOCKOUT_TIME="300"
+EOF
+
+    echo "Configuración del Portal Cautivo guardada."
+
+    # Aplicar cambios (recargar configuración y reiniciar si es necesario)
+    source /usr/local/JSBach/conf/portal.conf
+    if [ "$enabled" -eq 1 ]; then
+        fnc_aturar > /dev/null 2>&1
+        fnc_iniciar > /dev/null 2>&1
+        echo "Portal Cautivo reiniciado con la nueva configuración."
+    else
+        fnc_aturar > /dev/null 2>&1
+        echo "Portal Cautivo detenido."
+    fi
+}
+
 case "$1" in
     iniciar) fnc_iniciar ;;
     aturar) fnc_aturar ;;
@@ -188,5 +231,6 @@ case "$1" in
     auth) fnc_auth_user "$2" "$3" "$4" ;;
     deauth) fnc_deauth_user "$2" "$3" ;;
     cleanup) fnc_cleanup ;;
-    *) echo "Uso: $0 {iniciar|aturar|estat|auth|deauth|cleanup}" ;;
+    configurar) fnc_configurar "$2" "$3" "$4" "$5" "$6" "$7" "$8" ;;
+    *) echo "Uso: $0 {iniciar|aturar|estat|auth|deauth|cleanup|configurar}" ;;
 esac

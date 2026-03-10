@@ -28,6 +28,43 @@ if [ -z "$CLIENT_MAC" ]; then
     CLIENT_MAC=$(arp -an "$CLIENT_IP" | awk '{print $4}' | grep -oE '([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}')
 fi
 
+# Brute-force protection check
+LOCKOUT_FILE="/tmp/portal_failed_attempts/${CLIENT_IP//./_}"
+if [ -f "$LOCKOUT_FILE" ]; then
+    last_fail=$(stat -c %Y "$LOCKOUT_FILE")
+    now=$(date +%s)
+    diff=$((now - last_fail))
+    fails=$(cat "$LOCKOUT_FILE")
+    
+    if [ "$fails" -ge "$FAILED_ATTEMPTS_LIMIT" ]; then
+        if [ "$diff" -lt "$LOCKOUT_TIME" ]; then
+            echo "Content-type: text/html; charset=utf-8"
+            echo ""
+            cat << EOM
+            <html>
+            <head>
+                <style>
+                    body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; text-align: center; margin: 0; }
+                    .error { color: #f87171; font-size: 1.5rem; font-weight: bold; }
+                    .card { background: rgba(255,255,255,0.05); padding: 40px; border-radius: 20px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div class="error">⚠ Acceso Bloqueado Temporalmente</div>
+                    <p>Demasiados intentos fallidos. Por favor, inténtelo de nuevo en unos minutos.</p>
+                </div>
+            </body>
+            </html>
+EOM
+            exit 0
+        else
+            # Lockout expired, reset
+            rm -f "$LOCKOUT_FILE"
+        fi
+    fi
+fi
+
 VALID=0
 
 # Validación básica contra portal_users.conf
@@ -49,6 +86,12 @@ echo "Content-type: text/html; charset=utf-8"
 echo ""
 
 if [ "$VALID" -eq 1 ]; then
+    # Reset failed attempts on success
+    rm -f "$LOCKOUT_FILE"
+    
+    # Log success
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [LOGIN-SUCCESS] User: $USER_IN, IP: $CLIENT_IP" >> /usr/local/JSBach/logs/portal.log
+
     # Autenticar en el backend (redirigir salida a /dev/null para no romper el header CGI)
     if [ -n "$CLIENT_MAC" ]; then
         sudo /usr/local/JSBach/scripts/portal auth "$CLIENT_IP" "$CLIENT_MAC" "$USER_IN" > /dev/null 2>&1
@@ -73,6 +116,17 @@ if [ "$VALID" -eq 1 ]; then
     </html>
 EOM
 else
+    # Register failure
+    fails=1
+    if [ -f "$LOCKOUT_FILE" ]; then
+        fails=$(cat "$LOCKOUT_FILE")
+        fails=$((fails + 1))
+    fi
+    echo "$fails" > "$LOCKOUT_FILE"
+    
+    # Log failure
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [LOGIN-FAIL] User: $USER_IN, IP: $CLIENT_IP (Attempt $fails)" >> /usr/local/JSBach/logs/portal.log
+
     cat << EOM
     <html>
     <head>

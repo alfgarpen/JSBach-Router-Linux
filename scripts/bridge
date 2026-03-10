@@ -211,8 +211,12 @@ fnc_iniciar()
 	
 	### FALTA ESTAT BRIDGE PER NO INICIAR SI JA ESTA FUNCIONANT
 	
-	##CREAR  BRIDGE part interna
-	ip l a name br0 type bridge vlan_filtering 1
+	##CREAR o CONFIGURAR BRIDGE part interna
+	if ! ip link show br0 &>/dev/null; then
+		ip l a name br0 type bridge vlan_filtering 1
+	else
+		ip link set br0 type bridge vlan_filtering 1
+	fi
 	ip l s dev br0 up
 	
 	for LINIA in $(cat "$DIR/$PROJECTE/$DIR_CONF/$BRIDGE_CONF" | grep -v '^#'); do

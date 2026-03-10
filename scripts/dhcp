@@ -36,17 +36,38 @@ validate_subnet() {
     fi
 }
 
+fnc_estat() {
+    echo "<h2>dnsmasq status:</h2>"
+    echo "<pre>"
+    systemctl status dnsmasq | head -n 10
+    echo "</pre>"
+    echo "<h2>Habilitat a l'arrencada:</h2>"
+    echo "<pre>"
+    systemctl is-enabled dnsmasq
+    echo "</pre>"
+}
+
 fnc_iniciar() {
-    systemctl start dnsmasq.service
+    echo "Habilitant dnsmasq per a l'arrencada..."
+    systemctl enable dnsmasq
+    echo "Iniciant el servei dnsmasq..."
+    systemctl start dnsmasq
+    echo "Servei iniciat."
 }
 
 
 fnc_reiniciar() {
-    systemctl restart dnsmasq.service
+    echo "Reiniciant el servei dnsmasq..."
+    systemctl restart dnsmasq
+    echo "Servei reiniciat."
 }
 
 fnc_aturar() {
-    systemctl stop dnsmasq.service
+    echo "Aturant el servei dnsmasq..."
+    systemctl stop dnsmasq
+    echo "Deshabilitant dnsmasq de l'arrencada..."
+    systemctl disable dnsmasq
+    echo "Servei aturat."
 }
 
 fnc_consultar() {
@@ -117,6 +138,7 @@ fnc_restaurar() {
 }
 
 case "$1" in
+    estat) fnc_estat ;;
     iniciar) fnc_iniciar ;;
     reiniciar) fnc_reiniciar;;
     aturar) fnc_aturar ;;

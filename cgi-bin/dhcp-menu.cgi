@@ -100,10 +100,6 @@ a {
     <a href="/cgi-bin/dhcp.cgi?comand=configuracio" target="body">
       <div class="button">Configuració VLANS</div>
     </a>
-
-    <a href="/cgi-bin/dhcp.cgi?comand=restaurar" target="body">
-      <div class="button">Restaurar Backup</div>
-    </a>
   </div>
 </div>
 </body>

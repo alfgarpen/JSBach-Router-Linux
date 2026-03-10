@@ -7,10 +7,23 @@ echo "Content-type: text/html; charset=utf-8"
 echo ""
 
 # Procesar acciones (ej. desconectar usuario)
-if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
-    read -n "$CONTENT_LENGTH" QUERY_STRING
+if [ "$REQUEST_METHOD" = "GET" ]; then
+    QS="$QUERY_STRING"
+else
+    read -n "$CONTENT_LENGTH" QS
 fi
-# (Simplificación: en un entorno real usaríamos un parser de CGI mejor)
+
+ACTION=$(echo "$QS" | grep -o 'action=[^&]*' | cut -d'=' -f2)
+IP_ACTION=$(echo "$QS" | grep -o 'ip=[^&]*' | cut -d'=' -f2)
+MAC_ACTION=$(echo "$QS" | grep -o 'mac=[^&]*' | cut -d'=' -f2)
+
+if [ "$ACTION" = "kill" ] && [ -n "$IP_ACTION" ] && [ -n "$MAC_ACTION" ]; then
+    sudo /usr/local/JSBach/scripts/portal deauth "$IP_ACTION" "$MAC_ACTION" > /dev/null 2>&1
+    echo "Status: 302 Found"
+    echo "Location: portal-estat.cgi"
+    echo ""
+    exit 0
+fi
 
 cat << EOM
 <html>
