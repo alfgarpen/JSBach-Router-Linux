@@ -3,9 +3,11 @@
 source /usr/local/JSBach/conf/variables.conf
 source /usr/local/JSBach/conf/portal.conf
 
-SESSION_DIR=/tmp/portal_sessions
+SESSION_DIR=/usr/local/JSBach/run/portal/sessions
 mkdir -p "$SESSION_DIR"
 chmod 777 "$SESSION_DIR"
+mkdir -p /usr/local/JSBach/run/portal/failed_attempts
+chmod 777 /usr/local/JSBach/run/portal/failed_attempts
 
 # Detectar nombre de interfaz de VLAN
 get_vlan_if() {
@@ -54,12 +56,13 @@ fnc_iniciar() {
     iptables -F PORTAL_AUTH
     iptables -t nat -F PORTAL_REDIRECT
 
-    # Redirección HTTP y HTTPS hacia el portal
+    # Redirección HTTP hacia el portal
     SERVER_IP="$VLAN_IP"
     
-    # Capturar tráfico puerto 80 y 443
+    # Capturar tráfico puerto 80 (HTTP)
+    # Redirigimos solo el puerto 80. El puerto 443 NO se redirige para evitar errores SSL/HSTS
+    # que bloquean la detección de conectividad en clientes modernos.
     iptables -t nat -A PREROUTING -i "$IF_VLAN" -p tcp --dport 80 -j PORTAL_REDIRECT
-    iptables -t nat -A PREROUTING -i "$IF_VLAN" -p tcp --dport 443 -j PORTAL_REDIRECT
     
     # Excluir el propio servidor y Walled Garden
     iptables -t nat -A PORTAL_REDIRECT -d "$SERVER_IP" -j RETURN
@@ -69,21 +72,24 @@ fnc_iniciar() {
         iptables -t nat -A PORTAL_REDIRECT -d "$item" -j RETURN
     done
 
+    # IMPORTANTE: Los usuarios ya autenticados deben saltarse la redirección
+    iptables -t nat -A PORTAL_REDIRECT -m mark --mark 0x1 -j RETURN
+
     # Redirigir el resto al servidor local (Puerto 80 para el portal)
     iptables -t nat -A PORTAL_REDIRECT -p tcp --dport 80 -j DNAT --to-destination "$SERVER_IP:80"
-    iptables -t nat -A PORTAL_REDIRECT -p tcp --dport 443 -j DNAT --to-destination "$SERVER_IP:80"
 
-    # En el FORWARD, bloquear todo lo que no esté en PORTAL_AUTH
-    # Primero quitamos la regla anterior para evitar borrados fallidos o duplicados
+    # En el FORWARD, marcar paquetes de usuarios autenticados y permitir el paso
     iptables -D FORWARD -i "$IF_VLAN" -j PORTAL_AUTH 2>/dev/null
     iptables -I FORWARD -i "$IF_VLAN" -j PORTAL_AUTH
-    iptables -A PORTAL_AUTH -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # Regla para marcar paquetes de usuarios ya autorizados (para que se salten el NAT de arriba)
+    iptables -A PORTAL_AUTH -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
     
     # Permitir DNS y DHCP siempre
     iptables -A PORTAL_AUTH -p udp --dport 53 -j ACCEPT
     iptables -A PORTAL_AUTH -p udp --dport 67:68 -j ACCEPT
     
-    # El resto se dropea (las sesiones autenticadas se insertarán al principio de esta chain)
+    # El resto se dropea (las sesiones autenticadas se insertarán al principio como ACCEPT + MARK)
     iptables -A PORTAL_AUTH -j DROP
 }
 
@@ -91,20 +97,16 @@ fnc_aturar() {
     echo "Deteniendo Portal Cautivo para VLAN $VLAN_VID"
     local IF_VLAN=$(get_vlan_if "$VLAN_VID")
     
-    # Eliminar reglas de redirección nat
-    iptables -t nat -D PREROUTING -i "$IF_VLAN" -p tcp --dport 80 -j PORTAL_REDIRECT 2>/dev/null
-    iptables -t nat -D PREROUTING -i "$IF_VLAN" -p tcp --dport 443 -j PORTAL_REDIRECT 2>/dev/null
-    iptables -t nat -F PORTAL_REDIRECT 2>/dev/null
-    iptables -t nat -X PORTAL_REDIRECT 2>/dev/null
-
-    # Eliminar cualquier cadena PORTAL_REDIRECT errónea en la tabla filter
-    iptables -F PORTAL_REDIRECT 2>/dev/null
-    iptables -X PORTAL_REDIRECT 2>/dev/null
-
     # Eliminar saltos a PORTAL_AUTH
     iptables -D FORWARD -i "$IF_VLAN" -j PORTAL_AUTH 2>/dev/null
     
-    # Limpiar y eliminar chain PORTAL_AUTH
+    # Limpiar y eliminar PREROUTING jumps específicos
+    iptables -t nat -D PREROUTING -i "$IF_VLAN" -p tcp --dport 80 -j PORTAL_REDIRECT 2>/dev/null
+    iptables -t nat -D PREROUTING -i "$IF_VLAN" -p tcp --dport 443 -j PORTAL_REDIRECT 2>/dev/null
+
+    # Limpiar y eliminar chains
+    iptables -t nat -F PORTAL_REDIRECT 2>/dev/null
+    iptables -t nat -X PORTAL_REDIRECT 2>/dev/null
     iptables -F PORTAL_AUTH 2>/dev/null
     iptables -X PORTAL_AUTH 2>/dev/null
 }
@@ -121,7 +123,11 @@ fnc_estat() {
     iptables -S FORWARD | grep PORTAL_AUTH || echo "FORWARD -> PORTAL_AUTH: FALTA"
     echo
     echo "--- Reglas NAT (Redirección) ---"
-    iptables -t nat -L PORTAL_REDIRECT -n -v 2>/dev/null || echo "Chain PORTAL_REDIRECT no existe"
+    if iptables -t nat -L PORTAL_REDIRECT -n -v >/dev/null 2>&1; then
+        iptables -t nat -L PORTAL_REDIRECT -n -v
+    else
+        echo "Chain PORTAL_REDIRECT no existe"
+    fi
     echo
     echo "--- Reglas FILTER (Autorización) ---"
     iptables -L PORTAL_AUTH -n -v 2>/dev/null || echo "Chain PORTAL_AUTH no existe"
@@ -140,6 +146,26 @@ fnc_auth_user() {
         return
     fi
 
+    echo "Autenticando usuario $user (IP: $ip, MAC: $mac)"
+
+    # Añadir regla de aceptación con marca para evitar el redireccionamiento NAT
+    # Usamos -I para que vaya al principio de la cadena
+    iptables -I PORTAL_AUTH 1 -s "$ip" -m mac --mac-source "$mac" -j MARK --set-xmark 0x1/0xffffffff
+    iptables -I PORTAL_AUTH 2 -s "$ip" -m mac --mac-source "$mac" -j ACCEPT
+
+    # Crear archivo de sesión
+    local sid=$(echo "$ip$mac$(date +%s)" | sha256sum | cut -c1-16)
+    local session_file="$SESSION_DIR/$sid"
+    
+    cat > "$session_file" << EOF
+IP="$ip"
+MAC="$mac"
+USER="$user"
+START=$(date +%s)
+LAST=$(date +%s)
+EOF
+    chmod 644 "$session_file"
+
     # Log authentication
     echo "$(date '+%Y-%m-%d %H:%M:%S') [AUTH] User: $user, IP: $ip, MAC: $mac" >> /usr/local/JSBach/logs/portal.log
 
@@ -150,6 +176,7 @@ fnc_deauth_user() {
     local ip="$1"
     local mac="$2"
 
+    iptables -D PORTAL_AUTH -s "$ip" -m mac --mac-source "$mac" -j MARK --set-xmark 0x1/0xffffffff 2>/dev/null
     iptables -D PORTAL_AUTH -s "$ip" -m mac --mac-source "$mac" -j ACCEPT 2>/dev/null
     
     # Eliminar archivo de sesión

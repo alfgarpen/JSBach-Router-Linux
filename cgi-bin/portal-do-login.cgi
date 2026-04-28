@@ -29,7 +29,7 @@ if [ -z "$CLIENT_MAC" ]; then
 fi
 
 # Brute-force protection check
-LOCKOUT_FILE="/tmp/portal_failed_attempts/${CLIENT_IP//./_}"
+LOCKOUT_FILE="/usr/local/JSBach/run/portal/failed_attempts/${CLIENT_IP//./_}"
 if [ -f "$LOCKOUT_FILE" ]; then
     last_fail=$(stat -c %Y "$LOCKOUT_FILE")
     now=$(date +%s)

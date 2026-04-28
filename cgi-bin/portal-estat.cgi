@@ -47,7 +47,7 @@ th { color: #94a3b8; }
     <div class="card">
         <p>Estado General: $( [ "$ENABLED" -eq 1 ] && echo "<span class='status-enabled'>ACTIVO</span>" || echo "<span class='status-disabled'>INACTIVO</span>" )</p>
         <p>VLAN Asociada: <b>$VLAN_VID</b></p>
-        <p>Sesiones Activas: <b>$(ls /tmp/portal_sessions | wc -l)</b></p>
+        <p>Sesiones Activas: <b>$(ls /usr/local/JSBach/run/portal/sessions | wc -l)</b></p>
     </div>
 
     <h3>Sesiones Activas</h3>
@@ -66,7 +66,7 @@ th { color: #94a3b8; }
             <tbody>
 EOM
 
-for session_file in /tmp/portal_sessions/*; do
+for session_file in /usr/local/JSBach/run/portal/sessions/*; do
     [ -e "$session_file" ] || continue
     source "$session_file"
     start_fmt=$(date -d "@$START" "+%H:%M:%S")
