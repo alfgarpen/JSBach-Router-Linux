@@ -1,5 +1,5 @@
 #!/bin/bash
-
+source /usr/local/bin/jsbach-logger.sh
 source /usr/local/JSBach/conf/variables.conf
 source $DIR/$PROJECTE/$DIR_CONF/$CONF_IFWAN
 

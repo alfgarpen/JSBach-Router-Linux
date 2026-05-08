@@ -1,5 +1,5 @@
 #!/bin/bash
-
+source /usr/local/bin/jsbach-logger.sh
 source /usr/local/JSBach/conf/variables.conf
 
 CONF_FILE="/etc/dnsmasq.conf"
@@ -63,6 +63,7 @@ fnc_reiniciar() {
 }
 
 fnc_aturar() {
+    log_action "DHCP" "STOP" "Servicio iniciado desde menú" "warning"
     echo "Aturant el servei dnsmasq..."
     systemctl stop dnsmasq
     echo "Deshabilitant dnsmasq de l'arrencada..."
